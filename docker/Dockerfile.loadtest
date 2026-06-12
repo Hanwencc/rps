@@ -1,0 +1,9 @@
+FROM rust:1.92 AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release -p rps-loadtest
+
+FROM debian:bookworm-slim
+RUN mkdir -p /reports
+COPY --from=builder /app/target/release/rps-loadtest /usr/local/bin/rps-loadtest
+ENTRYPOINT ["/usr/local/bin/rps-loadtest"]

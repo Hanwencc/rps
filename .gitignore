@@ -1,0 +1,7 @@
+target/
+_reference/
+.npm-cache/
+web/node_modules/
+web/dist/
+data/
+*.log

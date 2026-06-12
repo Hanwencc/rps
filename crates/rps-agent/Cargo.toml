@@ -1,0 +1,16 @@
+[package]
+name = "rps-agent"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+rps-core = { path = "../rps-core" }
+rps-mux = { path = "../rps-mux" }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

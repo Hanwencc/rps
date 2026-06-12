@@ -1,0 +1,49 @@
+services:
+  rps-target:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test-target
+
+  rps-controller:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.controller
+    environment:
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+      - "10080:10080"
+      - "10081:10081/udp"
+      - "10082:10082"
+      - "10083:10083"
+      - "10083:10083/udp"
+    volumes:
+      - ./data:/var/lib/rps
+
+  rps-agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent
+    environment:
+      RUST_LOG: info
+    depends_on:
+      - rps-controller
+      - rps-target
+
+  rps-loadtest:
+    profiles:
+      - loadtest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.loadtest
+    depends_on:
+      - rps-controller
+      - rps-agent
+      - rps-target
+    volumes:
+      - ./docs:/reports
+    command:
+      - "--host"
+      - "rps-controller"
+      - "--report"
+      - "/reports/rps-docker-limit-report.md"

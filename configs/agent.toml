@@ -1,0 +1,4 @@
+[agent]
+server_addr = "127.0.0.1:8024"
+vkey = "change-me"
+reconnect_interval_secs = 5

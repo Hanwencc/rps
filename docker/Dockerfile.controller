@@ -1,0 +1,19 @@
+FROM node:24-bookworm-slim AS web-builder
+WORKDIR /app/web
+COPY web/package*.json ./
+RUN npm ci
+COPY web ./
+RUN npm run build
+
+FROM rust:1.92 AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release -p rps-controller
+
+FROM debian:bookworm-slim
+RUN mkdir -p /etc/rps /usr/share/rps/web /var/lib/rps
+COPY --from=builder /app/target/release/rps-controller /usr/local/bin/rps-controller
+COPY --from=web-builder /app/web/dist /usr/share/rps/web
+COPY configs/docker-controller.toml /etc/rps/controller.toml
+ENTRYPOINT ["/usr/local/bin/rps-controller"]
+CMD ["--config", "/etc/rps/controller.toml"]

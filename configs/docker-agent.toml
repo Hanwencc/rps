@@ -1,0 +1,4 @@
+[agent]
+server_addr = "rps-controller:8024"
+vkey = "change-me"
+reconnect_interval_secs = 5

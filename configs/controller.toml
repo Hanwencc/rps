@@ -1,0 +1,40 @@
+[server]
+bridge_addr = "127.0.0.1:8024"
+web_addr = "127.0.0.1:8080"
+web_dir = "web/dist"
+database_path = "data/rps.db"
+
+[server.http_proxy]
+listen = "127.0.0.1:10082"
+client_id = "client-1"
+enabled = true
+
+[server.socks5]
+listen = "127.0.0.1:10083"
+client_id = "client-1"
+enabled = true
+
+[[clients]]
+id = "client-1"
+vkey = "change-me"
+enabled = true
+remark = "local demo agent"
+max_connections = 1024
+compress = false
+encrypt = false
+
+[[tunnels]]
+id = "tcp-echo"
+client_id = "client-1"
+mode = "tcp"
+listen = "127.0.0.1:10080"
+target = "127.0.0.1:18081"
+enabled = true
+
+[[tunnels]]
+id = "udp-echo"
+client_id = "client-1"
+mode = "udp"
+listen = "127.0.0.1:10081"
+target = "127.0.0.1:18082"
+enabled = true

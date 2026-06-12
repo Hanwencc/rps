@@ -1,0 +1,7 @@
+target
+_reference
+.git
+*.log
+.npm-cache
+web/node_modules
+web/dist
