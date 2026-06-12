@@ -1,19 +1,5 @@
 <script setup lang="ts">
-import {
-  ArrowLeftRight,
-  Briefcase,
-  Gauge,
-  Globe2,
-  HelpCircle,
-  Layers,
-  Monitor,
-  Repeat2,
-  Server,
-  Settings,
-  ShieldOff,
-  Shuffle,
-  UserCog,
-} from "lucide-vue-next";
+import { Gauge, Layers, Monitor, Repeat2, Server, Shuffle, UserCog } from "lucide-vue-next";
 import type { MenuItem, MenuKey } from "../types";
 
 defineProps<{
@@ -27,16 +13,10 @@ const emit = defineEmits<{
 const menuItems: MenuItem[] = [
   { key: "dashboard", label: "仪表盘", icon: Gauge },
   { key: "clients", label: "客户端", icon: Monitor },
-  { key: "dns", label: "域名解析", icon: Globe2 },
   { key: "tcp", label: "TCP 隧道", icon: Repeat2 },
   { key: "udp", label: "UDP 隧道", icon: Shuffle },
   { key: "http", label: "HTTP 代理", icon: Server },
   { key: "socks", label: "SOCKS 代理", icon: Layers },
-  { key: "secret", label: "私密代理", icon: ShieldOff },
-  { key: "p2p", label: "P2P 连接", icon: ArrowLeftRight },
-  { key: "files", label: "文件访问", icon: Briefcase },
-  { key: "settings", label: "全局参数", icon: Settings },
-  { key: "help", label: "使用说明", icon: HelpCircle },
 ];
 </script>
 

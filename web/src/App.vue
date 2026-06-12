@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { createClient, createProxyAccount, loadConsoleData } from "./api";
 import PageHeader from "./components/PageHeader.vue";
 import Sidebar from "./components/Sidebar.vue";
 import ClientsPage from "./pages/ClientsPage.vue";
 import DashboardPage from "./pages/DashboardPage.vue";
-import PlaceholderPage from "./pages/PlaceholderPage.vue";
 import ProxyPage from "./pages/ProxyPage.vue";
 import TunnelsPage from "./pages/TunnelsPage.vue";
 import type {
@@ -22,19 +21,13 @@ import type {
 const menuLabels: Record<MenuKey, string> = {
   dashboard: "仪表盘",
   clients: "客户端",
-  dns: "域名解析",
   tcp: "TCP 隧道",
   udp: "UDP 隧道",
   http: "HTTP 代理",
   socks: "SOCKS 代理",
-  secret: "私密代理",
-  p2p: "P2P 连接",
-  files: "文件访问",
-  settings: "全局参数",
-  help: "使用说明",
 };
 
-const activeMenu = ref<MenuKey>("http");
+const activeMenu = ref<MenuKey>("dashboard");
 const status = ref<StatusResponse | null>(null);
 const clients = ref<ClientResponse[]>([]);
 const tunnels = ref<TunnelResponse[]>([]);
@@ -47,6 +40,7 @@ const createProxyError = ref<string | null>(null);
 const creatingClient = ref(false);
 const creatingProxy = ref(false);
 const lastUpdated = ref<string | null>(null);
+let refreshTimer: number | undefined;
 
 const activeTitle = computed(() => menuLabels[activeMenu.value]);
 const tcpTunnels = computed(() => tunnels.value.filter((tunnel) => tunnel.mode === "tcp"));
@@ -97,7 +91,13 @@ async function handleCreateProxyAccount(payload: CreateProxyAccountPayload) {
 
 onMounted(() => {
   void refresh();
-  window.setInterval(refresh, 5000);
+  refreshTimer = window.setInterval(refresh, 5000);
+});
+
+onUnmounted(() => {
+  if (refreshTimer !== undefined) {
+    window.clearInterval(refreshTimer);
+  }
 });
 </script>
 
@@ -156,7 +156,7 @@ onMounted(() => {
               @create="handleCreateProxyAccount"
             />
             <ProxyPage
-              v-else-if="activeMenu === 'socks'"
+              v-else
               :accounts="proxyAccounts"
               :clients="clients"
               :creating="creatingProxy"
@@ -165,7 +165,6 @@ onMounted(() => {
               :listener="proxy?.socks5 ?? null"
               @create="handleCreateProxyAccount"
             />
-            <PlaceholderPage v-else :title="activeTitle" />
           </template>
         </section>
       </div>

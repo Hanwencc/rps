@@ -33,6 +33,8 @@ struct ClientResponse {
     max_connections: Option<u32>,
     compress: bool,
     encrypt: bool,
+    rx_bytes: u64,
+    tx_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,12 +146,11 @@ async fn status(State(state): State<AppState>) -> Result<Json<StatusResponse>, A
 
 async fn clients(State(state): State<AppState>) -> Result<Json<Vec<ClientResponse>>, ApiError> {
     let clients = state.db.list_clients().await?;
-    Ok(Json(
-        clients
-            .into_iter()
-            .map(|client| client_response(&state, client))
-            .collect(),
-    ))
+    let mut response = Vec::with_capacity(clients.len());
+    for client in clients {
+        response.push(client_response(&state, client).await?);
+    }
+    Ok(Json(response))
 }
 
 async fn create_client(
@@ -174,7 +175,10 @@ async fn create_client(
         })
         .await
         .map_err(ApiError::from)?;
-    Ok((StatusCode::CREATED, Json(client_response(&state, client))))
+    Ok((
+        StatusCode::CREATED,
+        Json(client_response(&state, client).await?),
+    ))
 }
 
 async fn tunnels(State(state): State<AppState>) -> Result<Json<Vec<TunnelResponse>>, ApiError> {
@@ -242,8 +246,12 @@ async fn create_proxy_account(
     Ok((StatusCode::CREATED, Json(proxy_account_response(account))))
 }
 
-fn client_response(state: &AppState, client: crate::db::DbClient) -> ClientResponse {
-    ClientResponse {
+async fn client_response(
+    state: &AppState,
+    client: crate::db::DbClient,
+) -> anyhow::Result<ClientResponse> {
+    let traffic = state.db.get_traffic_counter("client", &client.id).await?;
+    Ok(ClientResponse {
         id: client.id.clone(),
         psk: client.psk,
         enabled: client.enabled,
@@ -252,7 +260,9 @@ fn client_response(state: &AppState, client: crate::db::DbClient) -> ClientRespo
         max_connections: client.max_connections,
         compress: client.compress,
         encrypt: client.encrypt,
-    }
+        rx_bytes: traffic.rx_bytes,
+        tx_bytes: traffic.tx_bytes,
+    })
 }
 
 fn proxy_account_response(account: crate::db::DbProxyAccount) -> ProxyAccountResponse {

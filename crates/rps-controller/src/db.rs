@@ -68,6 +68,12 @@ pub struct NewProxyAccount {
     pub remark: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct TrafficCounter {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
 impl Database {
     pub async fn open(path: impl AsRef<Path>, config: &ControllerConfig) -> anyhow::Result<Self> {
         let path = path.as_ref();
@@ -710,6 +716,31 @@ impl Database {
         Ok(())
     }
 
+    pub async fn get_traffic_counter(
+        &self,
+        scope: &str,
+        key: &str,
+    ) -> anyhow::Result<TrafficCounter> {
+        let row = sqlx::query(
+            "select rx_bytes, tx_bytes from traffic_counters where scope = ? and key = ?",
+        )
+        .bind(scope)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(TrafficCounter::default());
+        };
+
+        let rx_bytes: i64 = row.try_get("rx_bytes")?;
+        let tx_bytes: i64 = row.try_get("tx_bytes")?;
+        Ok(TrafficCounter {
+            rx_bytes: i64_to_u64(rx_bytes),
+            tx_bytes: i64_to_u64(tx_bytes),
+        })
+    }
+
     pub async fn capture_usage_snapshot(&self) -> anyhow::Result<usize> {
         let now = now_secs();
         let rows = sqlx::query("select scope, key, rx_bytes, tx_bytes from traffic_counters")
@@ -868,6 +899,10 @@ fn i64_to_bool(value: i64) -> bool {
 
 fn u64_to_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
+}
+
+fn i64_to_u64(value: i64) -> u64 {
+    value.max(0) as u64
 }
 
 fn now_secs() -> i64 {

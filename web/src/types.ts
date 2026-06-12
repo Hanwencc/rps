@@ -19,6 +19,8 @@ export type ClientResponse = {
   max_connections: number | null;
   compress: boolean;
   encrypt: boolean;
+  rx_bytes: number;
+  tx_bytes: number;
 };
 
 export type TunnelResponse = {
@@ -54,16 +56,10 @@ export type ProxyAccountResponse = {
 export type MenuKey =
   | "dashboard"
   | "clients"
-  | "dns"
   | "tcp"
   | "udp"
   | "http"
-  | "socks"
-  | "secret"
-  | "p2p"
-  | "files"
-  | "settings"
-  | "help";
+  | "socks";
 
 export type MenuItem = {
   key: MenuKey;
@@ -83,9 +79,6 @@ export type CreateClientPayload = {
   psk: string | null;
   remark: string | null;
   enabled: boolean;
-  max_connections: number | null;
-  compress: boolean;
-  encrypt: boolean;
 };
 
 export type CreateProxyAccountPayload = {
