@@ -12,7 +12,7 @@ export type StatusResponse = {
 
 export type ClientResponse = {
   id: string;
-  vkey: string;
+  psk: string;
   enabled: boolean;
   online: boolean;
   remark: string | null;
@@ -80,7 +80,7 @@ export type ConsoleData = {
 };
 
 export type CreateClientPayload = {
-  vkey: string | null;
+  psk: string | null;
   remark: string | null;
   enabled: boolean;
   max_connections: number | null;

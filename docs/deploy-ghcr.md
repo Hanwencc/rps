@@ -75,7 +75,10 @@ services:
       - "10083:10083"
       - "10083:10083/udp"
     volumes:
-      - ./data:/var/lib/rps
+      - rps-data:/var/lib/rps
+
+volumes:
+  rps-data:
 ```
 
 客户端：
@@ -88,7 +91,8 @@ services:
     environment:
       RUST_LOG: info
       server_addr: rps-controller:8024
-      vkey: change-me
+      client_id: client-1
+      psk: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 镜像内默认配置路径：
@@ -114,7 +118,8 @@ command: ["--config", "/etc/rps/agent.toml"]
 agent 环境变量：
 
 - `server_addr`: controller bridge 地址，必填。
-- `vkey`: agent 认证密钥，必填。
+- `client_id`: client UUID，必填。
+- `psk`: agent PSK，必填，建议使用 64 hex chars。
 - `reconnect_interval_secs`: 重连间隔秒数，可选；不传默认 `5`。
 
 ## 5. 验证

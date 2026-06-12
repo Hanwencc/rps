@@ -48,14 +48,21 @@ async fn main() -> anyhow::Result<()> {
 
 fn load_agent_config_with_env(path: &str) -> anyhow::Result<AgentConfigRoot> {
     let env_server_addr = env_value("server_addr").or_else(|| env_value("RPS_SERVER_ADDR"));
-    let env_vkey = env_value("vkey").or_else(|| env_value("RPS_VKEY"));
+    let env_client_id = env_value("client_id").or_else(|| env_value("RPS_CLIENT_ID"));
+    let env_psk = env_value("psk").or_else(|| env_value("RPS_PSK"));
     let env_reconnect_interval =
         env_value("reconnect_interval_secs").or_else(|| env_value("RPS_RECONNECT_INTERVAL_SECS"));
 
-    if env_server_addr.is_some() || env_vkey.is_some() || env_reconnect_interval.is_some() {
+    if env_server_addr.is_some()
+        || env_client_id.is_some()
+        || env_psk.is_some()
+        || env_reconnect_interval.is_some()
+    {
         let server_addr =
             env_server_addr.ok_or_else(|| anyhow::anyhow!("agent env server_addr is required"))?;
-        let vkey = env_vkey.ok_or_else(|| anyhow::anyhow!("agent env vkey is required"))?;
+        let client_id =
+            env_client_id.ok_or_else(|| anyhow::anyhow!("agent env client_id is required"))?;
+        let psk = env_psk.ok_or_else(|| anyhow::anyhow!("agent env psk is required"))?;
         let reconnect_interval_secs = env_reconnect_interval
             .map(|value| value.parse().context("invalid reconnect_interval_secs env"))
             .transpose()?
@@ -63,7 +70,8 @@ fn load_agent_config_with_env(path: &str) -> anyhow::Result<AgentConfigRoot> {
         return Ok(AgentConfigRoot {
             agent: AgentConfig {
                 server_addr,
-                vkey,
+                client_id,
+                psk,
                 reconnect_interval_secs,
             },
         });
@@ -80,7 +88,7 @@ fn env_value(name: &str) -> Option<String> {
 }
 
 async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
-    info!(server_addr = %config.server_addr, "connecting rps-controller");
+    info!(server_addr = %config.server_addr, client_id = %config.client_id, "connecting rps-controller");
     let control = connect_role(&config, HelloRole::Control).await?;
     let data = connect_role(&config, HelloRole::Data).await?;
 
@@ -100,7 +108,7 @@ async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
 async fn connect_role(config: &AgentConfig, role: HelloRole) -> anyhow::Result<TcpStream> {
     let mut stream = TcpStream::connect(&config.server_addr).await?;
     stream.set_nodelay(true)?;
-    let hello = Hello::new(role, config.vkey.clone());
+    let hello = Hello::new(role, config.client_id.clone(), config.psk.clone());
     write_json(&mut stream, &hello).await?;
     let ack: HelloAck = read_json(&mut stream).await?;
     if !ack.ok {

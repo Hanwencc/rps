@@ -16,7 +16,7 @@ enabled = true
 
 [[clients]]
 id = "client-1"
-vkey = "change-me"
+psk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 enabled = true
 remark = "docker demo agent"
 max_connections = 1024

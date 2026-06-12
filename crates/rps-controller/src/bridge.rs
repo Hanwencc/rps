@@ -36,7 +36,11 @@ async fn handle_conn(
         write_json(&mut stream, &HelloAck::err("bad magic")).await?;
         return Ok(());
     }
-    let client = match state.db.find_enabled_client_by_vkey(&hello.vkey).await {
+    let client = match state
+        .db
+        .find_enabled_client_by_id_and_psk(&hello.client_id, &hello.psk)
+        .await
+    {
         Ok(Some(client)) => client,
         Ok(None) => {
             write_json(&mut stream, &HelloAck::err("invalid client credentials")).await?;

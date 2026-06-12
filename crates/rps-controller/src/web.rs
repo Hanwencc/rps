@@ -26,7 +26,7 @@ struct StatusResponse {
 #[derive(Debug, Serialize)]
 struct ClientResponse {
     id: String,
-    vkey: String,
+    psk: String,
     enabled: bool,
     online: bool,
     remark: Option<String>,
@@ -37,7 +37,7 @@ struct ClientResponse {
 
 #[derive(Debug, Deserialize)]
 struct CreateClientRequest {
-    vkey: Option<String>,
+    psk: Option<String>,
     enabled: Option<bool>,
     remark: Option<String>,
     max_connections: Option<u32>,
@@ -157,15 +157,15 @@ async fn create_client(
     Json(request): Json<CreateClientRequest>,
 ) -> Result<(StatusCode, Json<ClientResponse>), ApiError> {
     let id = Uuid::new_v4().to_string();
-    let vkey = request
-        .vkey
+    let psk = request
+        .psk
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+        .unwrap_or_else(random_psk);
     let client = state
         .db
         .create_client(crate::db::NewClient {
             id,
-            vkey,
+            psk,
             enabled: request.enabled.unwrap_or(true),
             remark: request.remark.filter(|value| !value.trim().is_empty()),
             max_connections: request.max_connections,
@@ -245,7 +245,7 @@ async fn create_proxy_account(
 fn client_response(state: &AppState, client: crate::db::DbClient) -> ClientResponse {
     ClientResponse {
         id: client.id.clone(),
-        vkey: client.vkey,
+        psk: client.psk,
         enabled: client.enabled,
         online: state.clients.contains_key(&client.id),
         remark: client.remark,
@@ -274,6 +274,10 @@ fn random_proxy_secret() -> String {
         .chars()
         .take(12)
         .collect()
+}
+
+fn random_psk() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
 #[derive(Debug)]

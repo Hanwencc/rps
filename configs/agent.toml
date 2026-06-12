@@ -1,4 +1,5 @@
 [agent]
 server_addr = "127.0.0.1:8024"
-vkey = "change-me"
+client_id = "client-1"
+psk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 reconnect_interval_secs = 5

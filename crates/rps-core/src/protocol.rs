@@ -17,16 +17,18 @@ pub enum HelloRole {
 pub struct Hello {
     pub magic: String,
     pub role: HelloRole,
-    pub vkey: String,
+    pub client_id: String,
+    pub psk: String,
     pub version: String,
 }
 
 impl Hello {
-    pub fn new(role: HelloRole, vkey: String) -> Self {
+    pub fn new(role: HelloRole, client_id: String, psk: String) -> Self {
         Self {
             magic: MAGIC.to_string(),
             role,
-            vkey,
+            client_id,
+            psk,
             version: VERSION.to_string(),
         }
     }

@@ -18,7 +18,7 @@ services:
       - "10083:10083"
       - "10083:10083/udp"
     volumes:
-      - ./data:/var/lib/rps
+      - rps-data:/var/lib/rps
 
   rps-agent:
     build:
@@ -27,7 +27,8 @@ services:
     environment:
       RUST_LOG: info
       server_addr: rps-controller:8024
-      vkey: change-me
+      client_id: client-1
+      psk: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     depends_on:
       - rps-controller
       - rps-target
@@ -49,3 +50,6 @@ services:
       - "rps-controller"
       - "--report"
       - "/reports/rps-docker-limit-report.md"
+
+volumes:
+  rps-data:

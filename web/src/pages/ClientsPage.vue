@@ -14,7 +14,7 @@ const emit = defineEmits<{
 }>();
 
 const form = ref({
-  vkey: "",
+  psk: "",
   remark: "",
   enabled: true,
   max_connections: null as number | null,
@@ -26,7 +26,7 @@ const onlineClients = computed(() => props.clients.filter((client) => client.onl
 
 function submit() {
   emit("create", {
-    vkey: form.value.vkey.trim() || null,
+    psk: form.value.psk.trim() || null,
     remark: form.value.remark.trim() || null,
     enabled: form.value.enabled,
     max_connections: form.value.max_connections || null,
@@ -34,7 +34,7 @@ function submit() {
     encrypt: form.value.encrypt,
   });
   form.value = {
-    vkey: "",
+    psk: "",
     remark: "",
     enabled: true,
     max_connections: null,
@@ -52,9 +52,9 @@ function submit() {
       </div>
       <form class="grid gap-4 p-5 lg:grid-cols-4" @submit.prevent="submit">
         <label class="block">
-          <span class="text-sm text-slate-600">认证密钥 vkey</span>
+          <span class="text-sm text-slate-600">认证密钥 psk</span>
           <input
-            v-model="form.vkey"
+            v-model="form.psk"
             class="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-sm"
             placeholder="留空自动生成 UUID"
           />
@@ -99,7 +99,7 @@ function submit() {
           <thead class="bg-slate-50 text-xs text-slate-500">
             <tr>
               <th class="px-5 py-3">客户端 ID</th>
-              <th class="px-5 py-3">vkey</th>
+              <th class="px-5 py-3">psk</th>
               <th class="px-5 py-3">状态</th>
               <th class="px-5 py-3">备注</th>
               <th class="px-5 py-3">连接上限</th>
@@ -109,7 +109,7 @@ function submit() {
           <tbody class="divide-y divide-slate-100">
             <tr v-for="client in clients" :key="client.id">
               <td class="px-5 py-3 font-mono text-slate-900">{{ client.id }}</td>
-              <td class="px-5 py-3 font-mono text-slate-600">{{ client.vkey }}</td>
+              <td class="px-5 py-3 font-mono text-slate-600">{{ client.psk }}</td>
               <td class="px-5 py-3">
                 <StatusBadge :enabled="client.online" enabled-text="在线" disabled-text="离线" />
               </td>

@@ -37,7 +37,7 @@ pub struct ProxyListenConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClientConfig {
     pub id: String,
-    pub vkey: String,
+    pub psk: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub remark: Option<String>,
@@ -75,7 +75,8 @@ pub struct AgentConfigRoot {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentConfig {
     pub server_addr: String,
-    pub vkey: String,
+    pub client_id: String,
+    pub psk: String,
     #[serde(default = "default_reconnect_interval")]
     pub reconnect_interval_secs: u64,
 }

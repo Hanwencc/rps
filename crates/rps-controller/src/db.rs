@@ -17,7 +17,7 @@ pub struct Database {
 #[derive(Debug, Clone)]
 pub struct DbClient {
     pub id: String,
-    pub vkey: String,
+    pub psk: String,
     pub enabled: bool,
     pub remark: Option<String>,
     pub max_connections: Option<u32>,
@@ -49,7 +49,7 @@ pub struct DbProxyAccount {
 #[derive(Debug, Clone)]
 pub struct NewClient {
     pub id: String,
-    pub vkey: String,
+    pub psk: String,
     pub enabled: bool,
     pub remark: Option<String>,
     pub max_connections: Option<u32>,
@@ -76,6 +76,7 @@ impl Database {
             .filter(|parent| !parent.as_os_str().is_empty())
         {
             tokio::fs::create_dir_all(parent).await?;
+            secure_database_dir(parent).await?;
         }
 
         let url = format!("sqlite://{}", path.to_string_lossy().replace('\\', "/"));
@@ -89,8 +90,10 @@ impl Database {
             .connect_with(options)
             .await?;
         let db = Self { pool };
+        secure_database_files(path).await?;
         db.migrate().await?;
         db.seed_from_config(config).await?;
+        secure_database_files(path).await?;
         Ok(db)
     }
 
@@ -99,7 +102,7 @@ impl Database {
             r#"
             create table if not exists clients (
                 id text primary key,
-                vkey text not null unique,
+                psk text not null unique,
                 enabled integer not null default 1,
                 remark text,
                 max_connections integer,
@@ -202,6 +205,75 @@ impl Database {
             sqlx::query(statement).execute(&self.pool).await?;
         }
 
+        self.migrate_clients_psk().await?;
+        Ok(())
+    }
+
+    async fn migrate_clients_psk(&self) -> anyhow::Result<()> {
+        let columns = sqlx::query("pragma table_info(clients)")
+            .fetch_all(&self.pool)
+            .await?;
+        let has_psk = columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .map(|name| name == "psk")
+                .unwrap_or(false)
+        });
+        let has_vkey = columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .map(|name| name == "vkey")
+                .unwrap_or(false)
+        });
+
+        if !has_psk {
+            sqlx::query("alter table clients add column psk text")
+                .execute(&self.pool)
+                .await?;
+        }
+        if has_vkey {
+            for statement in [
+                "drop table if exists clients_new",
+                "drop table if exists clients_legacy",
+                "alter table clients rename to clients_legacy",
+                r#"
+                create table clients (
+                    id text primary key,
+                    psk text not null unique,
+                    enabled integer not null default 1,
+                    remark text,
+                    max_connections integer,
+                    compress integer not null default 0,
+                    encrypt integer not null default 0,
+                    created_at integer not null,
+                    updated_at integer not null
+                )
+                "#,
+                r#"
+                insert or ignore into clients
+                    (id, psk, enabled, remark, max_connections, compress, encrypt, created_at, updated_at)
+                select
+                    id,
+                    coalesce(nullif(psk, ''), vkey),
+                    enabled,
+                    remark,
+                    max_connections,
+                    compress,
+                    encrypt,
+                    created_at,
+                    updated_at
+                from clients_legacy
+                where coalesce(nullif(psk, ''), vkey) is not null
+                    and coalesce(nullif(psk, ''), vkey) != ''
+                "#,
+                "drop table clients_legacy",
+            ] {
+                sqlx::query(statement).execute(&self.pool).await?;
+            }
+        }
+        sqlx::query(
+            "create unique index if not exists idx_clients_psk_unique on clients(psk) where psk is not null",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -225,13 +297,21 @@ impl Database {
         let now = now_secs();
         sqlx::query(
             r#"
-            insert or ignore into clients
-                (id, vkey, enabled, remark, max_connections, compress, encrypt, created_at, updated_at)
+            insert into clients
+                (id, psk, enabled, remark, max_connections, compress, encrypt, created_at, updated_at)
             values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict(id) do update set
+                psk = excluded.psk,
+                enabled = excluded.enabled,
+                remark = excluded.remark,
+                max_connections = excluded.max_connections,
+                compress = excluded.compress,
+                encrypt = excluded.encrypt,
+                updated_at = excluded.updated_at
             "#,
         )
         .bind(&client.id)
-        .bind(&client.vkey)
+        .bind(&client.psk)
         .bind(bool_to_i64(client.enabled))
         .bind(&client.remark)
         .bind(client.max_connections.map(i64::from))
@@ -295,12 +375,12 @@ impl Database {
         sqlx::query(
             r#"
             insert into clients
-                (id, vkey, enabled, remark, max_connections, compress, encrypt, created_at, updated_at)
+                (id, psk, enabled, remark, max_connections, compress, encrypt, created_at, updated_at)
             values (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&input.id)
-        .bind(&input.vkey)
+        .bind(&input.psk)
         .bind(bool_to_i64(input.enabled))
         .bind(&input.remark)
         .bind(input.max_connections.map(i64::from))
@@ -318,7 +398,7 @@ impl Database {
 
     pub async fn get_client(&self, id: &str) -> anyhow::Result<Option<DbClient>> {
         let row = sqlx::query(
-            "select id, vkey, enabled, remark, max_connections, compress, encrypt from clients where id = ?",
+            "select id, psk, enabled, remark, max_connections, compress, encrypt from clients where id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -326,25 +406,24 @@ impl Database {
         row.map(row_to_client).transpose()
     }
 
-    pub async fn find_enabled_client_by_vkey(
+    pub async fn find_enabled_client_by_id_and_psk(
         &self,
-        vkey: &str,
+        id: &str,
+        psk: &str,
     ) -> anyhow::Result<Option<DbClient>> {
-        let rows = sqlx::query(
-            "select id, vkey, enabled, remark, max_connections, compress, encrypt from clients where enabled = 1 and vkey = ?",
+        let row = sqlx::query(
+            "select id, psk, enabled, remark, max_connections, compress, encrypt from clients where enabled = 1 and id = ? and psk = ?",
         )
-        .bind(vkey)
-        .fetch_all(&self.pool)
+        .bind(id)
+        .bind(psk)
+        .fetch_optional(&self.pool)
         .await?;
-        if rows.len() > 1 {
-            anyhow::bail!("ambiguous client vkey");
-        }
-        rows.into_iter().next().map(row_to_client).transpose()
+        row.map(row_to_client).transpose()
     }
 
     pub async fn list_clients(&self) -> anyhow::Result<Vec<DbClient>> {
         let rows = sqlx::query(
-            "select id, vkey, enabled, remark, max_connections, compress, encrypt from clients order by created_at asc, id asc",
+            "select id, psk, enabled, remark, max_connections, compress, encrypt from clients order by created_at asc, id asc",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -672,7 +751,7 @@ fn row_to_client(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<DbClient> {
     let max_connections: Option<i64> = row.try_get("max_connections")?;
     Ok(DbClient {
         id: row.try_get("id")?,
-        vkey: row.try_get("vkey")?,
+        psk: row.try_get("psk")?,
         enabled: i64_to_bool(row.try_get("enabled")?),
         remark: row.try_get("remark")?,
         max_connections: max_connections.map(|value| value.max(0) as u32),
@@ -711,6 +790,48 @@ fn row_to_proxy_account(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<DbProxyA
         enabled: i64_to_bool(row.try_get("enabled")?),
         remark: row.try_get("remark")?,
     })
+}
+
+#[cfg(unix)]
+async fn secure_database_dir(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn secure_database_dir(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn secure_database_files(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    for path in [
+        path.to_path_buf(),
+        sqlite_sidecar_path(path, "-wal"),
+        sqlite_sidecar_path(path, "-shm"),
+    ] {
+        if tokio::fs::try_exists(&path).await? {
+            tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn secure_database_files(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    std::path::PathBuf::from(sidecar)
 }
 
 fn validate_proxy_kind(kind: &str) -> anyhow::Result<()> {
