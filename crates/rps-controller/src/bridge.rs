@@ -1,6 +1,7 @@
 use crate::AppState;
+use rps_core::noise;
 use rps_core::protocol::{
-    ControlMessage, Hello, HelloAck, HelloRole, MAGIC, read_json, write_json,
+    ControlMessage, Hello, HelloAck, HelloRole, MAGIC, NoisePrelude, read_json, write_json,
 };
 use rps_mux::Mux;
 use tokio::net::{TcpListener, TcpStream};
@@ -31,26 +32,26 @@ async fn handle_conn(
     remote_addr: String,
 ) -> anyhow::Result<()> {
     stream.set_nodelay(true)?;
+    let prelude: NoisePrelude = read_json(&mut stream).await?;
+    if prelude.magic != MAGIC {
+        anyhow::bail!("bad magic");
+    }
+    let client = state
+        .db
+        .find_enabled_client_by_id(&prelude.client_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("invalid client id"))?;
+
+    let mut stream = noise::accept(stream, &client.psk).await?;
     let hello: Hello = read_json(&mut stream).await?;
     if hello.magic != MAGIC {
         write_json(&mut stream, &HelloAck::err("bad magic")).await?;
         return Ok(());
     }
-    let client = match state
-        .db
-        .find_enabled_client_by_id_and_psk(&hello.client_id, &hello.psk)
-        .await
-    {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            write_json(&mut stream, &HelloAck::err("invalid client credentials")).await?;
-            return Ok(());
-        }
-        Err(err) => {
-            write_json(&mut stream, &HelloAck::err(err.to_string())).await?;
-            return Ok(());
-        }
-    };
+    if hello.client_id != client.id {
+        write_json(&mut stream, &HelloAck::err("client id mismatch")).await?;
+        return Ok(());
+    }
 
     write_json(&mut stream, &HelloAck::ok()).await?;
 

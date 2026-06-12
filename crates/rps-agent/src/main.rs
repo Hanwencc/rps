@@ -3,9 +3,10 @@ use bytes::Bytes;
 use clap::Parser;
 use rps_core::{
     config::{AgentConfig, AgentConfigRoot, load_agent_config},
+    noise,
     protocol::{
-        ControlMessage, Hello, HelloAck, HelloRole, OpenRequest, TargetProtocol, read_json,
-        write_json,
+        ControlMessage, Hello, HelloAck, HelloRole, NoisePrelude, OpenRequest, TargetProtocol,
+        read_json, write_json,
     },
 };
 use rps_mux::Mux;
@@ -14,7 +15,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
     net::{TcpStream, UdpSocket},
 };
 use tracing::{info, warn};
@@ -105,10 +106,14 @@ async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn connect_role(config: &AgentConfig, role: HelloRole) -> anyhow::Result<TcpStream> {
+async fn connect_role(config: &AgentConfig, role: HelloRole) -> anyhow::Result<DuplexStream> {
     let mut stream = TcpStream::connect(&config.server_addr).await?;
     stream.set_nodelay(true)?;
-    let hello = Hello::new(role, config.client_id.clone(), config.psk.clone());
+    let prelude = NoisePrelude::new(config.client_id.clone());
+    write_json(&mut stream, &prelude).await?;
+
+    let mut stream = noise::connect(stream, &config.psk).await?;
+    let hello = Hello::new(role, config.client_id.clone());
     write_json(&mut stream, &hello).await?;
     let ack: HelloAck = read_json(&mut stream).await?;
     if !ack.ok {
@@ -120,7 +125,7 @@ async fn connect_role(config: &AgentConfig, role: HelloRole) -> anyhow::Result<T
     Ok(stream)
 }
 
-async fn run_control(mut stream: TcpStream) {
+async fn run_control(mut stream: DuplexStream) {
     loop {
         let ts = now_secs();
         if let Err(err) = write_json(&mut stream, &ControlMessage::Ping { ts }).await {

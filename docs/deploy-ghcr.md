@@ -119,7 +119,7 @@ agent 环境变量：
 
 - `server_addr`: controller bridge 地址，必填。
 - `client_id`: client UUID，必填。
-- `psk`: agent PSK，必填，建议使用 64 hex chars。
+- `psk`: agent Noise PSK，必填，必须使用 64 hex chars；需要保密，不会在 bridge 中明文发送。
 - `reconnect_interval_secs`: 重连间隔秒数，可选；不传默认 `5`。
 
 ## 5. 验证

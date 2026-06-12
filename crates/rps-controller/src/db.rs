@@ -406,16 +406,11 @@ impl Database {
         row.map(row_to_client).transpose()
     }
 
-    pub async fn find_enabled_client_by_id_and_psk(
-        &self,
-        id: &str,
-        psk: &str,
-    ) -> anyhow::Result<Option<DbClient>> {
+    pub async fn find_enabled_client_by_id(&self, id: &str) -> anyhow::Result<Option<DbClient>> {
         let row = sqlx::query(
-            "select id, psk, enabled, remark, max_connections, compress, encrypt from clients where enabled = 1 and id = ? and psk = ?",
+            "select id, psk, enabled, remark, max_connections, compress, encrypt from clients where enabled = 1 and id = ?",
         )
         .bind(id)
-        .bind(psk)
         .fetch_optional(&self.pool)
         .await?;
         row.map(row_to_client).transpose()

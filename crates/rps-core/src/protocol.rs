@@ -14,21 +14,36 @@ pub enum HelloRole {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NoisePrelude {
+    pub magic: String,
+    pub client_id: String,
+    pub version: String,
+}
+
+impl NoisePrelude {
+    pub fn new(client_id: String) -> Self {
+        Self {
+            magic: MAGIC.to_string(),
+            client_id,
+            version: VERSION.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Hello {
     pub magic: String,
     pub role: HelloRole,
     pub client_id: String,
-    pub psk: String,
     pub version: String,
 }
 
 impl Hello {
-    pub fn new(role: HelloRole, client_id: String, psk: String) -> Self {
+    pub fn new(role: HelloRole, client_id: String) -> Self {
         Self {
             magic: MAGIC.to_string(),
             role,
             client_id,
-            psk,
             version: VERSION.to_string(),
         }
     }
