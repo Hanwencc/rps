@@ -10,6 +10,11 @@ use tracing::{error, info, warn};
 
 const MAX_HEADER: usize = 64 * 1024;
 
+struct HttpProxyAuth {
+    route: proxy_tcp::StreamRoute,
+    account_id: Option<String>,
+}
+
 pub async fn run(state: AppState, proxy: ProxyListenConfig) {
     if let Err(err) = run_inner(state, proxy).await {
         error!(error = %err, "http proxy stopped");
@@ -41,8 +46,8 @@ async fn handle_http_proxy(
     socket.set_nodelay(true)?;
     let header = read_header(&mut socket).await?;
     let header_text = std::str::from_utf8(&header)?;
-    let route = match authenticated_route(&state, &route, header_text).await? {
-        Some(route) => route,
+    let auth = match authenticated_route(&state, &route, header_text).await? {
+        Some(auth) => auth,
         None => {
             socket
                 .write_all(
@@ -52,6 +57,9 @@ async fn handle_http_proxy(
             anyhow::bail!("http proxy authentication failed");
         }
     };
+    let session_guard = state.proxy_manager.register(auth.account_id.clone());
+    let shutdown = session_guard.shutdown_rx();
+    let route = auth.route;
     let mut lines = header_text.split("\r\n");
     let request_line = lines
         .next()
@@ -74,7 +82,11 @@ async fn handle_http_proxy(
             remote_addr,
         )
         .await?;
-        return proxy_tcp::pipe_tcp_mux(socket, stream, None, Some(recorder)).await;
+        let result =
+            proxy_tcp::pipe_tcp_mux_with_shutdown(socket, stream, None, Some(recorder), shutdown)
+                .await;
+        drop(session_guard);
+        return result;
     }
 
     let target = http_target(uri, header_text)?;
@@ -82,16 +94,28 @@ async fn handle_http_proxy(
     let recorder = proxy_tcp::TrafficRecorder::new(&state, &route);
     let stream =
         proxy_tcp::open_stream(state, &route, TargetProtocol::Tcp, target, remote_addr).await?;
-    proxy_tcp::pipe_tcp_mux(socket, stream, Some(Bytes::from(rewritten)), Some(recorder)).await
+    let result = proxy_tcp::pipe_tcp_mux_with_shutdown(
+        socket,
+        stream,
+        Some(Bytes::from(rewritten)),
+        Some(recorder),
+        shutdown,
+    )
+    .await;
+    drop(session_guard);
+    result
 }
 
 async fn authenticated_route(
     state: &AppState,
     fallback: &proxy_tcp::StreamRoute,
     header: &str,
-) -> anyhow::Result<Option<proxy_tcp::StreamRoute>> {
+) -> anyhow::Result<Option<HttpProxyAuth>> {
     if !state.db.has_enabled_proxy_accounts("http").await? {
-        return Ok(Some(fallback.clone()));
+        return Ok(Some(HttpProxyAuth {
+            route: fallback.clone(),
+            account_id: None,
+        }));
     }
     let Some((username, password)) = parse_basic_proxy_auth(header) else {
         return Ok(None);
@@ -103,9 +127,12 @@ async fn authenticated_route(
     else {
         return Ok(None);
     };
-    Ok(Some(proxy_tcp::StreamRoute {
-        tunnel_id: format!("http-proxy:{}", account.id),
-        client_id: account.client_id,
+    Ok(Some(HttpProxyAuth {
+        route: proxy_tcp::StreamRoute {
+            tunnel_id: format!("http-proxy:{}", account.id),
+            client_id: account.client_id,
+        },
+        account_id: Some(account.id),
     }))
 }
 

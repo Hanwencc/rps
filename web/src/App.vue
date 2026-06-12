@@ -8,6 +8,7 @@ import {
   createProxyAccount,
   createTunnel,
   deleteClient,
+  deleteProxyAccount,
   deleteTunnel,
   loadConsoleData,
   login,
@@ -61,6 +62,7 @@ const creatingTunnel = ref(false);
 const creatingProxy = ref(false);
 const deletingClientId = ref<string | null>(null);
 const deletingTunnelId = ref<string | null>(null);
+const deletingProxyAccountId = ref<string | null>(null);
 const lastUpdated = ref<string | null>(null);
 let refreshTimer: number | undefined;
 
@@ -108,6 +110,7 @@ const pageProps = computed<Record<string, unknown>>(() => {
         accounts: proxyAccounts.value,
         clients: clients.value,
         creating: creatingProxy.value,
+        deletingId: deletingProxyAccountId.value,
         error: createProxyError.value,
         kind: "http",
         listener: proxy.value?.http_proxy ?? null,
@@ -117,6 +120,7 @@ const pageProps = computed<Record<string, unknown>>(() => {
         accounts: proxyAccounts.value,
         clients: clients.value,
         creating: creatingProxy.value,
+        deletingId: deletingProxyAccountId.value,
         error: createProxyError.value,
         kind: "socks5",
         listener: proxy.value?.socks5 ?? null,
@@ -242,6 +246,19 @@ async function handleDeleteTunnel(id: string) {
   }
 }
 
+async function handleDeleteProxyAccount(id: string) {
+  createProxyError.value = null;
+  deletingProxyAccountId.value = id;
+  try {
+    await deleteProxyAccount(id);
+    await refresh();
+  } catch (err) {
+    createProxyError.value = err instanceof Error ? err.message : "删除代理账号失败";
+  } finally {
+    deletingProxyAccountId.value = null;
+  }
+}
+
 async function handleRouteCreate(payload: RouteCreatePayload) {
   switch (activeMenu.value) {
     case "clients":
@@ -266,6 +283,10 @@ async function handleRouteDelete(id: string) {
     case "tcp":
     case "udp":
       await handleDeleteTunnel(id);
+      break;
+    case "http":
+    case "socks":
+      await handleDeleteProxyAccount(id);
       break;
   }
 }

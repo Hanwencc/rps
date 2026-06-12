@@ -112,3 +112,9 @@ export async function createProxyAccount(
     body: JSON.stringify(payload),
   });
 }
+
+export async function deleteProxyAccount(id: string): Promise<void> {
+  await fetchEmpty(`/api/proxy-accounts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}

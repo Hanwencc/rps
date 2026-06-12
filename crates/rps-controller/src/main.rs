@@ -1,6 +1,7 @@
 mod bridge;
 mod db;
 mod proxy_http;
+mod proxy_manager;
 mod proxy_socks5;
 mod proxy_tcp;
 mod proxy_udp;
@@ -12,6 +13,7 @@ use anyhow::Context;
 use clap::Parser;
 use dashmap::DashMap;
 use db::Database;
+use proxy_manager::ProxyManager;
 use rps_core::config::{ControllerConfig, load_controller_config};
 use rps_mux::MuxHandle;
 use std::sync::Arc;
@@ -33,6 +35,7 @@ pub(crate) struct AppState {
     clients: Arc<DashMap<String, MuxHandle>>,
     web_sessions: Arc<DashMap<String, WebSession>>,
     tunnel_manager: Arc<TunnelManager>,
+    proxy_manager: ProxyManager,
 }
 
 #[derive(Clone)]
@@ -58,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         clients: Arc::new(DashMap::new()),
         web_sessions: Arc::new(DashMap::new()),
         tunnel_manager: Arc::new(TunnelManager::new()),
+        proxy_manager: ProxyManager::new(),
     };
 
     info!(bridge_addr = %config.server.bridge_addr, "starting rps-controller");
@@ -66,13 +70,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(bridge::run(state.clone()));
     tokio::spawn(web::run(state.clone()));
 
-    if let Some(proxy) = config.server.http_proxy.clone().filter(|p| p.enabled) {
-        tokio::spawn(proxy_http::run(state.clone(), proxy));
-    }
-
-    if let Some(proxy) = config.server.socks5.clone().filter(|p| p.enabled) {
-        tokio::spawn(proxy_socks5::run(state.clone(), proxy));
-    }
+    state.proxy_manager.start_from_config(state.clone());
 
     state
         .tunnel_manager

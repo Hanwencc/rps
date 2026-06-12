@@ -578,6 +578,14 @@ impl Database {
         row.map(row_to_proxy_account).transpose()
     }
 
+    pub async fn delete_proxy_account(&self, id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("delete from proxy_accounts where id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn list_proxy_accounts(
         &self,
         kind: Option<&str>,

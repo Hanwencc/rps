@@ -91,6 +91,7 @@ struct ProxyAccountResponse {
     password: String,
     enabled: bool,
     remark: Option<String>,
+    active_connections: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +157,7 @@ async fn run_inner(state: AppState) -> anyhow::Result<()> {
             "/api/proxy-accounts",
             get(proxy_accounts).post(create_proxy_account),
         )
+        .route("/api/proxy-accounts/{id}", delete(delete_proxy_account))
         .fallback_service(ServeDir::new(&web_dir).fallback(ServeFile::new(index)))
         .with_state(state);
 
@@ -466,7 +468,10 @@ async fn proxy_accounts(
     require_auth(&headers, &state)?;
     let accounts = state.db.list_proxy_accounts(query.kind.as_deref()).await?;
     Ok(Json(
-        accounts.into_iter().map(proxy_account_response).collect(),
+        accounts
+            .into_iter()
+            .map(|account| proxy_account_response(&state, account))
+            .collect(),
     ))
 }
 
@@ -500,7 +505,26 @@ async fn create_proxy_account(
             remark: request.remark.filter(|value| !value.trim().is_empty()),
         })
         .await?;
-    Ok((StatusCode::CREATED, Json(proxy_account_response(account))))
+    Ok((
+        StatusCode::CREATED,
+        Json(proxy_account_response(&state, account)),
+    ))
+}
+
+async fn delete_proxy_account(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_auth(&headers, &state)?;
+    if !state.db.delete_proxy_account(&id).await? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("proxy account {id} not found"),
+        });
+    }
+    state.proxy_manager.revoke_account(&id);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn tunnel_response(tunnel: crate::db::DbTunnel) -> TunnelResponse {
@@ -533,7 +557,11 @@ async fn client_response(
     })
 }
 
-fn proxy_account_response(account: crate::db::DbProxyAccount) -> ProxyAccountResponse {
+fn proxy_account_response(
+    state: &AppState,
+    account: crate::db::DbProxyAccount,
+) -> ProxyAccountResponse {
+    let active_connections = state.proxy_manager.active_count(&account.id);
     ProxyAccountResponse {
         id: account.id,
         kind: account.kind,
@@ -542,6 +570,7 @@ fn proxy_account_response(account: crate::db::DbProxyAccount) -> ProxyAccountRes
         password: account.password,
         enabled: account.enabled,
         remark: account.remark,
+        active_connections,
     }
 }
 

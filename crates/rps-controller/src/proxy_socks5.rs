@@ -185,6 +185,7 @@ async fn handle_conn(
         CMD_CONNECT => handle_connect(state, auth, socket, remote_addr, header[3]).await,
         CMD_UDP_ASSOCIATE => {
             handle_udp_associate(
+                state,
                 socket,
                 remote_addr,
                 udp_addr,
@@ -278,16 +279,17 @@ async fn handle_connect(
             return Err(err);
         }
     };
+    let account_id = auth.account_id.clone();
     let route = proxy_tcp::StreamRoute {
-        tunnel_id: auth
-            .account_id
+        tunnel_id: account_id
+            .clone()
             .map(|id| format!("socks5:{id}"))
             .unwrap_or_else(|| "socks5".to_string()),
         client_id: auth.client_id,
     };
     let recorder = proxy_tcp::TrafficRecorder::new(&state, &route);
     let stream = match proxy_tcp::open_stream(
-        state,
+        state.clone(),
         &route,
         TargetProtocol::Tcp,
         target,
@@ -303,10 +305,16 @@ async fn handle_connect(
     };
     let bind_addr = socket.local_addr().ok();
     send_reply(&mut socket, REP_SUCCEEDED, bind_addr).await?;
-    proxy_tcp::pipe_tcp_mux(socket, stream, None, Some(recorder)).await
+    let session_guard = state.proxy_manager.register(account_id);
+    let shutdown = session_guard.shutdown_rx();
+    let result =
+        proxy_tcp::pipe_tcp_mux_with_shutdown(socket, stream, None, Some(recorder), shutdown).await;
+    drop(session_guard);
+    result
 }
 
 async fn handle_udp_associate(
+    state: AppState,
     mut socket: TcpStream,
     remote_addr: SocketAddr,
     udp_addr: SocketAddr,
@@ -348,9 +356,14 @@ async fn handle_udp_associate(
     debug!(%remote_addr, udp_addr = %udp_addr, "socks5 udp associate accepted");
     send_reply(&mut socket, REP_SUCCEEDED, Some(udp_addr)).await?;
 
+    let session_guard = state.proxy_manager.register(auth.account_id.clone());
+    let mut shutdown = session_guard.shutdown_rx();
     let mut buf = [0_u8; 1024];
     loop {
-        let n = socket.read(&mut buf).await?;
+        let n = tokio::select! {
+            result = socket.read(&mut buf) => result?,
+            _ = shutdown.changed() => break,
+        };
         if n == 0 {
             break;
         }
@@ -367,6 +380,7 @@ async fn handle_udp_associate(
         });
         close_sessions_for_ip(&sessions, remote_addr.ip()).await;
     }
+    drop(session_guard);
     Ok(())
 }
 

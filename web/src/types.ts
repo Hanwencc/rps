@@ -60,6 +60,7 @@ export type ProxyAccountResponse = {
   password: string;
   enabled: boolean;
   remark: string | null;
+  active_connections: number;
 };
 
 export type MenuKey =

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Activity } from "lucide-vue-next";
+import { Activity, Trash2 } from "lucide-vue-next";
 import StatusBadge from "../components/StatusBadge.vue";
 import type {
   ClientResponse,
@@ -15,11 +15,13 @@ const props = defineProps<{
   clients: ClientResponse[];
   accounts: ProxyAccountResponse[];
   creating: boolean;
+  deletingId: string | null;
   error: string | null;
 }>();
 
 const emit = defineEmits<{
   create: [payload: CreateProxyAccountPayload];
+  delete: [id: string];
 }>();
 
 const form = ref({
@@ -60,6 +62,12 @@ function submit() {
   form.value.password = "";
   form.value.remark = "";
   form.value.enabled = true;
+}
+
+function confirmDelete(account: ProxyAccountResponse) {
+  if (window.confirm(`确认删除代理账号 ${account.username}？删除后新的代理认证会立即失效。`)) {
+    emit("delete", account.id);
+  }
 }
 </script>
 
@@ -173,12 +181,14 @@ function submit() {
               <th class="px-5 py-3">账号</th>
               <th class="px-5 py-3">密码</th>
               <th class="px-5 py-3">状态</th>
+              <th class="px-5 py-3">当前连接</th>
               <th class="px-5 py-3">备注</th>
+              <th class="px-5 py-3">操作</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
             <tr v-if="filteredAccounts.length === 0">
-              <td class="px-5 py-6 text-center text-slate-500" colspan="6">
+              <td class="px-5 py-6 text-center text-slate-500" colspan="8">
                 暂无账号。未创建账号时，该代理端口保持无认证兼容模式。
               </td>
             </tr>
@@ -188,7 +198,19 @@ function submit() {
               <td class="px-5 py-3 font-mono text-slate-600">{{ account.username }}</td>
               <td class="px-5 py-3 font-mono text-slate-600">{{ account.password }}</td>
               <td class="px-5 py-3"><StatusBadge :enabled="account.enabled" /></td>
+              <td class="px-5 py-3 font-mono text-slate-900">{{ account.active_connections }}</td>
               <td class="px-5 py-3 text-slate-600">{{ account.remark || "-" }}</td>
+              <td class="px-5 py-3">
+                <button
+                  class="inline-flex items-center gap-1 rounded border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                  :disabled="deletingId === account.id"
+                  type="button"
+                  @click="confirmDelete(account)"
+                >
+                  <Trash2 :size="14" />
+                  {{ deletingId === account.id ? "删除中" : "删除" }}
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
