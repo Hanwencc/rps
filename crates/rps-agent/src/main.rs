@@ -2,14 +2,17 @@ use anyhow::Context;
 use bytes::Bytes;
 use clap::Parser;
 use rps_core::{
-    config::{AgentConfig, load_agent_config},
+    config::{AgentConfig, AgentConfigRoot, load_agent_config},
     protocol::{
         ControlMessage, Hello, HelloAck, HelloRole, OpenRequest, TargetProtocol, read_json,
         write_json,
     },
 };
 use rps_mux::Mux;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    env,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
@@ -29,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let root = load_agent_config(&args.config)?;
+    let root = load_agent_config_with_env(&args.config)?;
     loop {
         if let Err(err) = run_agent(root.agent.clone()).await {
             warn!(error = %err, "agent session ended");
@@ -39,6 +42,39 @@ async fn main() -> anyhow::Result<()> {
         ))
         .await;
     }
+}
+
+fn load_agent_config_with_env(path: &str) -> anyhow::Result<AgentConfigRoot> {
+    let env_server_addr = env_value("server_addr").or_else(|| env_value("RPS_SERVER_ADDR"));
+    let env_vkey = env_value("vkey").or_else(|| env_value("RPS_VKEY"));
+    let env_reconnect_interval =
+        env_value("reconnect_interval_secs").or_else(|| env_value("RPS_RECONNECT_INTERVAL_SECS"));
+
+    if env_server_addr.is_some() || env_vkey.is_some() || env_reconnect_interval.is_some() {
+        let server_addr =
+            env_server_addr.ok_or_else(|| anyhow::anyhow!("agent env server_addr is required"))?;
+        let vkey = env_vkey.ok_or_else(|| anyhow::anyhow!("agent env vkey is required"))?;
+        let reconnect_interval_secs = env_reconnect_interval
+            .map(|value| value.parse().context("invalid reconnect_interval_secs env"))
+            .transpose()?
+            .unwrap_or(5);
+        return Ok(AgentConfigRoot {
+            agent: AgentConfig {
+                server_addr,
+                vkey,
+                reconnect_interval_secs,
+            },
+        });
+    }
+
+    load_agent_config(path)
+}
+
+fn env_value(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {

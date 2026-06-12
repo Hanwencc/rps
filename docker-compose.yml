@@ -26,6 +26,8 @@ services:
       dockerfile: docker/Dockerfile.agent
     environment:
       RUST_LOG: info
+      server_addr: rps-controller:8024
+      vkey: change-me
     depends_on:
       - rps-controller
       - rps-target
