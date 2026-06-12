@@ -14,8 +14,8 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::net::UdpSocket;
-use tracing::{error, info, warn};
+use tokio::{net::UdpSocket, sync::watch};
+use tracing::{info, warn};
 
 const UDP_IDLE_SECS: u64 = 120;
 
@@ -24,14 +24,21 @@ struct UdpSession {
     last_seen: Arc<AtomicU64>,
 }
 
-pub async fn run(state: AppState, tunnel: TunnelConfig) {
-    if let Err(err) = run_inner(state, tunnel).await {
-        error!(error = %err, "udp proxy stopped");
-    }
+pub async fn serve(
+    state: AppState,
+    tunnel: TunnelConfig,
+    socket: UdpSocket,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    run_socket(state, tunnel, Arc::new(socket), shutdown).await
 }
 
-async fn run_inner(state: AppState, tunnel: TunnelConfig) -> anyhow::Result<()> {
-    let socket = Arc::new(UdpSocket::bind(&tunnel.listen).await?);
+async fn run_socket(
+    state: AppState,
+    tunnel: TunnelConfig,
+    socket: Arc<UdpSocket>,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     let sessions = Arc::new(DashMap::<SocketAddr, UdpSession>::new());
     let route = proxy_tcp::StreamRoute {
         tunnel_id: tunnel.id.clone(),
@@ -42,9 +49,13 @@ async fn run_inner(state: AppState, tunnel: TunnelConfig) -> anyhow::Result<()> 
 
     {
         let sessions = sessions.clone();
+        let mut shutdown = shutdown.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                    _ = shutdown.changed() => break,
+                }
                 let now = now_secs();
                 let stale: Vec<_> = sessions
                     .iter()
@@ -64,7 +75,13 @@ async fn run_inner(state: AppState, tunnel: TunnelConfig) -> anyhow::Result<()> 
 
     let mut buf = vec![0_u8; 64 * 1024];
     loop {
-        let (n, remote_addr) = socket.recv_from(&mut buf).await?;
+        let (n, remote_addr) = tokio::select! {
+            result = socket.recv_from(&mut buf) => result?,
+            _ = shutdown.changed() => {
+                info!(tunnel_id = %tunnel.id, listen = %tunnel.listen, "udp proxy stopping");
+                break;
+            }
+        };
         let data = Bytes::copy_from_slice(&buf[..n]);
         let writer = if let Some(session) = sessions.get(&remote_addr) {
             session.last_seen.store(now_secs(), Ordering::Relaxed);
@@ -139,6 +156,14 @@ async fn run_inner(state: AppState, tunnel: TunnelConfig) -> anyhow::Result<()> 
             recorder.add(0, data_len);
         }
     }
+
+    let remaining: Vec<_> = sessions.iter().map(|entry| *entry.key()).collect();
+    for remote_addr in remaining {
+        if let Some((_, session)) = sessions.remove(&remote_addr) {
+            let _ = session.writer.close().await;
+        }
+    }
+    Ok(())
 }
 
 fn now_secs() -> u64 {

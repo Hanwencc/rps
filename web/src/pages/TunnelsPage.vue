@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import { Trash2 } from "lucide-vue-next";
 import type { ClientResponse, CreateTunnelPayload, TunnelResponse } from "../types";
 
 const props = defineProps<{
@@ -8,11 +9,13 @@ const props = defineProps<{
   tunnels: TunnelResponse[];
   clients: ClientResponse[];
   creating: boolean;
+  deletingId: string | null;
   error: string | null;
 }>();
 
 const emit = defineEmits<{
   create: [payload: CreateTunnelPayload];
+  delete: [id: string];
 }>();
 
 const form = ref({
@@ -49,6 +52,13 @@ function submit() {
   form.value.listen = "";
   form.value.target = "";
   form.value.enabled = true;
+}
+
+function confirmDelete(tunnel: TunnelResponse) {
+  const suffix = tunnel.enabled ? "。删除后监听端口会立即停止接收新连接" : "";
+  if (window.confirm(`确认删除隧道 ${tunnel.id}？${suffix}`)) {
+    emit("delete", tunnel.id);
+  }
 }
 </script>
 
@@ -127,6 +137,7 @@ function submit() {
               <th class="px-5 py-3">目标地址</th>
               <th class="px-5 py-3">客户端</th>
               <th class="px-5 py-3">状态</th>
+              <th class="px-5 py-3">操作</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
@@ -136,9 +147,20 @@ function submit() {
               <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.target || "-" }}</td>
               <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.client_id }}</td>
               <td class="px-5 py-3">{{ tunnel.enabled ? "启用" : "停用" }}</td>
+              <td class="px-5 py-3">
+                <button
+                  class="inline-flex items-center gap-1 rounded border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                  :disabled="deletingId === tunnel.id"
+                  type="button"
+                  @click="confirmDelete(tunnel)"
+                >
+                  <Trash2 :size="14" />
+                  {{ deletingId === tunnel.id ? "删除中" : "删除" }}
+                </button>
+              </td>
             </tr>
             <tr v-if="tunnels.length === 0">
-              <td class="px-5 py-8 text-center text-slate-500" colspan="5">暂无隧道</td>
+              <td class="px-5 py-8 text-center text-slate-500" colspan="6">暂无隧道</td>
             </tr>
           </tbody>
         </table>

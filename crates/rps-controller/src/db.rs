@@ -449,6 +449,28 @@ impl Database {
         Ok(count.max(0) as usize)
     }
 
+    pub async fn client_reference_count(&self, id: &str) -> anyhow::Result<usize> {
+        let mut count = 0usize;
+        for query in [
+            "select count(*) as count from tunnels where client_id = ?",
+            "select count(*) as count from proxy_listeners where client_id = ?",
+            "select count(*) as count from proxy_accounts where client_id = ?",
+        ] {
+            let row = sqlx::query(query).bind(id).fetch_one(&self.pool).await?;
+            let value: i64 = row.try_get("count")?;
+            count += value.max(0) as usize;
+        }
+        Ok(count)
+    }
+
+    pub async fn delete_client(&self, id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("delete from clients where id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn list_tunnels(&self) -> anyhow::Result<Vec<DbTunnel>> {
         let rows = sqlx::query(
             "select id, client_id, mode, listen, target, enabled from tunnels order by created_at asc, id asc",
@@ -485,6 +507,14 @@ impl Database {
         .fetch_one(&self.pool)
         .await?;
         row_to_tunnel(row)
+    }
+
+    pub async fn delete_tunnel(&self, id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("delete from tunnels where id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn count_enabled_tunnels(&self) -> anyhow::Result<usize> {

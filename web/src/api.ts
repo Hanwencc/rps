@@ -37,6 +37,19 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function fetchEmpty(path: string, init?: RequestInit): Promise<void> {
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    ...init,
+    headers: {
+      ...init?.headers,
+    },
+  });
+  if (!response.ok) {
+    throw new HttpError(path, response.status, await response.text());
+  }
+}
+
 export async function authStatus(): Promise<AuthStatusResponse> {
   return fetchJson<AuthStatusResponse>("/api/auth/status");
 }
@@ -72,10 +85,22 @@ export async function createClient(payload: CreateClientPayload): Promise<Client
   });
 }
 
+export async function deleteClient(id: string): Promise<void> {
+  await fetchEmpty(`/api/clients/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function createTunnel(payload: CreateTunnelPayload): Promise<TunnelResponse> {
   return fetchJson<TunnelResponse>("/api/tunnels", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteTunnel(id: string): Promise<void> {
+  await fetchEmpty(`/api/tunnels/${encodeURIComponent(id)}`, {
+    method: "DELETE",
   });
 }
 

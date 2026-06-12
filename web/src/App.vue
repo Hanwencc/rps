@@ -1,21 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import { RouterView, useRoute } from "vue-router";
 import {
   HttpError,
   authStatus,
   createClient,
   createProxyAccount,
   createTunnel,
+  deleteClient,
+  deleteTunnel,
   loadConsoleData,
   login,
 } from "./api";
 import PageHeader from "./components/PageHeader.vue";
 import Sidebar from "./components/Sidebar.vue";
-import ClientsPage from "./pages/ClientsPage.vue";
-import DashboardPage from "./pages/DashboardPage.vue";
 import LoginPage from "./pages/LoginPage.vue";
-import ProxyPage from "./pages/ProxyPage.vue";
-import TunnelsPage from "./pages/TunnelsPage.vue";
 import type {
   ClientResponse,
   CreateClientPayload,
@@ -29,6 +28,8 @@ import type {
   TunnelResponse,
 } from "./types";
 
+type RouteCreatePayload = CreateClientPayload | CreateTunnelPayload | CreateProxyAccountPayload;
+
 const menuLabels: Record<MenuKey, string> = {
   dashboard: "仪表盘",
   clients: "客户端",
@@ -38,7 +39,7 @@ const menuLabels: Record<MenuKey, string> = {
   socks: "SOCKS 代理",
 };
 
-const activeMenu = ref<MenuKey>("dashboard");
+const route = useRoute();
 const authenticated = ref(false);
 const authLoading = ref(true);
 const loginLoading = ref(false);
@@ -58,12 +59,76 @@ const createProxyError = ref<string | null>(null);
 const creatingClient = ref(false);
 const creatingTunnel = ref(false);
 const creatingProxy = ref(false);
+const deletingClientId = ref<string | null>(null);
+const deletingTunnelId = ref<string | null>(null);
 const lastUpdated = ref<string | null>(null);
 let refreshTimer: number | undefined;
 
-const activeTitle = computed(() => menuLabels[activeMenu.value]);
+const activeMenu = computed<MenuKey>(() => {
+  const menu = route.meta.menu;
+  return typeof menu === "string" && menu in menuLabels ? (menu as MenuKey) : "dashboard";
+});
+const activeTitle = computed(() => {
+  const title = route.meta.title;
+  return typeof title === "string" ? title : menuLabels[activeMenu.value];
+});
 const tcpTunnels = computed(() => tunnels.value.filter((tunnel) => tunnel.mode === "tcp"));
 const udpTunnels = computed(() => tunnels.value.filter((tunnel) => tunnel.mode === "udp"));
+const pageProps = computed<Record<string, unknown>>(() => {
+  switch (activeMenu.value) {
+    case "clients":
+      return {
+        clients: clients.value,
+        creating: creatingClient.value,
+        deletingId: deletingClientId.value,
+        error: createClientError.value,
+      };
+    case "tcp":
+      return {
+        clients: clients.value,
+        creating: creatingTunnel.value,
+        deletingId: deletingTunnelId.value,
+        error: createTunnelError.value,
+        mode: "tcp",
+        title: "TCP 隧道",
+        tunnels: tcpTunnels.value,
+      };
+    case "udp":
+      return {
+        clients: clients.value,
+        creating: creatingTunnel.value,
+        deletingId: deletingTunnelId.value,
+        error: createTunnelError.value,
+        mode: "udp",
+        title: "UDP 隧道",
+        tunnels: udpTunnels.value,
+      };
+    case "http":
+      return {
+        accounts: proxyAccounts.value,
+        clients: clients.value,
+        creating: creatingProxy.value,
+        error: createProxyError.value,
+        kind: "http",
+        listener: proxy.value?.http_proxy ?? null,
+      };
+    case "socks":
+      return {
+        accounts: proxyAccounts.value,
+        clients: clients.value,
+        creating: creatingProxy.value,
+        error: createProxyError.value,
+        kind: "socks5",
+        listener: proxy.value?.socks5 ?? null,
+      };
+    default:
+      return {
+        clients: clients.value,
+        status: status.value,
+        tunnels: tunnels.value,
+      };
+  }
+});
 
 async function refresh() {
   if (!authenticated.value) {
@@ -151,6 +216,60 @@ async function handleCreateProxyAccount(payload: CreateProxyAccountPayload) {
   }
 }
 
+async function handleDeleteClient(id: string) {
+  createClientError.value = null;
+  deletingClientId.value = id;
+  try {
+    await deleteClient(id);
+    await refresh();
+  } catch (err) {
+    createClientError.value = err instanceof Error ? err.message : "删除客户端失败";
+  } finally {
+    deletingClientId.value = null;
+  }
+}
+
+async function handleDeleteTunnel(id: string) {
+  createTunnelError.value = null;
+  deletingTunnelId.value = id;
+  try {
+    await deleteTunnel(id);
+    await refresh();
+  } catch (err) {
+    createTunnelError.value = err instanceof Error ? err.message : "删除隧道失败";
+  } finally {
+    deletingTunnelId.value = null;
+  }
+}
+
+async function handleRouteCreate(payload: RouteCreatePayload) {
+  switch (activeMenu.value) {
+    case "clients":
+      await handleCreateClient(payload as CreateClientPayload);
+      break;
+    case "tcp":
+    case "udp":
+      await handleCreateTunnel(payload as CreateTunnelPayload);
+      break;
+    case "http":
+    case "socks":
+      await handleCreateProxyAccount(payload as CreateProxyAccountPayload);
+      break;
+  }
+}
+
+async function handleRouteDelete(id: string) {
+  switch (activeMenu.value) {
+    case "clients":
+      await handleDeleteClient(id);
+      break;
+    case "tcp":
+    case "udp":
+      await handleDeleteTunnel(id);
+      break;
+  }
+}
+
 function startRefreshTimer() {
   stopRefreshTimer();
   refreshTimer = window.setInterval(refresh, 5000);
@@ -195,7 +314,7 @@ onUnmounted(stopRefreshTimer);
 
   <main v-else class="min-h-screen bg-[#eef1f5] text-slate-800">
     <div class="flex min-h-screen">
-      <Sidebar :active-menu="activeMenu" @select="activeMenu = $event" />
+      <Sidebar :active-menu="activeMenu" />
 
       <div class="min-w-0 flex-1 md:pl-[220px]">
         <PageHeader :last-updated="lastUpdated" :title="activeTitle" @refresh="refresh" />
@@ -213,59 +332,14 @@ onUnmounted(stopRefreshTimer);
           </div>
 
           <template v-else>
-            <DashboardPage
-              v-if="activeMenu === 'dashboard'"
-              :clients="clients"
-              :status="status"
-              :tunnels="tunnels"
-            />
-            <ClientsPage
-              v-else-if="activeMenu === 'clients'"
-              :clients="clients"
-              :creating="creatingClient"
-              :error="createClientError"
-              @create="handleCreateClient"
-            />
-            <TunnelsPage
-              v-else-if="activeMenu === 'tcp'"
-              :clients="clients"
-              :creating="creatingTunnel"
-              :error="createTunnelError"
-              mode="tcp"
-              title="TCP 隧道"
-              :tunnels="tcpTunnels"
-              @create="handleCreateTunnel"
-            />
-            <TunnelsPage
-              v-else-if="activeMenu === 'udp'"
-              :clients="clients"
-              :creating="creatingTunnel"
-              :error="createTunnelError"
-              mode="udp"
-              title="UDP 隧道"
-              :tunnels="udpTunnels"
-              @create="handleCreateTunnel"
-            />
-            <ProxyPage
-              v-else-if="activeMenu === 'http'"
-              :accounts="proxyAccounts"
-              :clients="clients"
-              :creating="creatingProxy"
-              :error="createProxyError"
-              kind="http"
-              :listener="proxy?.http_proxy ?? null"
-              @create="handleCreateProxyAccount"
-            />
-            <ProxyPage
-              v-else
-              :accounts="proxyAccounts"
-              :clients="clients"
-              :creating="creatingProxy"
-              :error="createProxyError"
-              kind="socks5"
-              :listener="proxy?.socks5 ?? null"
-              @create="handleCreateProxyAccount"
-            />
+            <RouterView v-slot="{ Component }">
+              <component
+                :is="Component"
+                v-bind="pageProps"
+                @create="handleRouteCreate"
+                @delete="handleRouteDelete"
+              />
+            </RouterView>
           </template>
         </section>
       </div>

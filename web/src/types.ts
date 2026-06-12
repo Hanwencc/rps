@@ -73,6 +73,7 @@ export type MenuKey =
 export type MenuItem = {
   key: MenuKey;
   label: string;
+  to: string;
   icon: Component;
 };
 

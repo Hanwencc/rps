@@ -1,12 +1,12 @@
-use crate::{AppState, WebSession, proxy_tcp, proxy_udp};
+use crate::{AppState, WebSession, tunnel_manager::tunnel_config_from_db};
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use hmac::{Hmac, Mac};
-use rps_core::config::{ProxyListenConfig, TunnelConfig, TunnelMode};
+use rps_core::config::{ProxyListenConfig, TunnelMode};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
@@ -148,7 +148,9 @@ async fn run_inner(state: AppState) -> anyhow::Result<()> {
         .route("/api/auth/logout", post(logout))
         .route("/api/status", get(status))
         .route("/api/clients", get(clients).post(create_client))
+        .route("/api/clients/{id}", delete(delete_client))
         .route("/api/tunnels", get(tunnels).post(create_tunnel))
+        .route("/api/tunnels/{id}", delete(delete_tunnel))
         .route("/api/proxy", get(proxy))
         .route(
             "/api/proxy-accounts",
@@ -341,6 +343,36 @@ async fn create_client(
     ))
 }
 
+async fn delete_client(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_auth(&headers, &state)?;
+    if state.clients.contains_key(&id) {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "client is online, stop agent before deleting it".to_string(),
+        });
+    }
+    let reference_count = state.db.client_reference_count(&id).await?;
+    if reference_count > 0 {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "client is still referenced by {reference_count} tunnel/proxy config(s)"
+            ),
+        });
+    }
+    if !state.db.delete_client(&id).await? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("client {id} not found"),
+        });
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn tunnels(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -385,19 +417,34 @@ async fn create_tunnel(
         .await?;
 
     if tunnel.enabled {
-        let tunnel_config = tunnel_config(&tunnel);
-        let state_for_task = state.clone();
-        match tunnel_config.mode {
-            TunnelMode::Tcp => {
-                tokio::spawn(proxy_tcp::run(state_for_task, tunnel_config));
-            }
-            TunnelMode::Udp => {
-                tokio::spawn(proxy_udp::run(state_for_task, tunnel_config));
-            }
+        let tunnel_config = tunnel_config_from_db(&tunnel);
+        if let Err(err) = state
+            .tunnel_manager
+            .start(state.clone(), tunnel_config)
+            .await
+        {
+            let _ = state.db.delete_tunnel(&tunnel.id).await;
+            return Err(ApiError::from(err));
         }
     }
 
     Ok((StatusCode::CREATED, Json(tunnel_response(tunnel))))
+}
+
+async fn delete_tunnel(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_auth(&headers, &state)?;
+    if !state.db.delete_tunnel(&id).await? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("tunnel {id} not found"),
+        });
+    }
+    state.tunnel_manager.stop(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn proxy(
@@ -463,17 +510,6 @@ fn tunnel_response(tunnel: crate::db::DbTunnel) -> TunnelResponse {
         mode: tunnel.mode,
         listen: tunnel.listen,
         target: tunnel.target,
-        enabled: tunnel.enabled,
-    }
-}
-
-fn tunnel_config(tunnel: &crate::db::DbTunnel) -> TunnelConfig {
-    TunnelConfig {
-        id: tunnel.id.clone(),
-        client_id: tunnel.client_id.clone(),
-        mode: tunnel.mode.clone(),
-        listen: tunnel.listen.clone(),
-        target: tunnel.target.clone(),
         enabled: tunnel.enabled,
     }
 }

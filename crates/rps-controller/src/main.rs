@@ -5,17 +5,19 @@ mod proxy_socks5;
 mod proxy_tcp;
 mod proxy_udp;
 mod traffic;
+mod tunnel_manager;
 mod web;
 
 use anyhow::Context;
 use clap::Parser;
 use dashmap::DashMap;
 use db::Database;
-use rps_core::config::{ControllerConfig, TunnelMode, load_controller_config};
+use rps_core::config::{ControllerConfig, load_controller_config};
 use rps_mux::MuxHandle;
 use std::sync::Arc;
 use tracing::info;
 use traffic::TrafficAggregator;
+use tunnel_manager::TunnelManager;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -30,6 +32,7 @@ pub(crate) struct AppState {
     traffic: TrafficAggregator,
     clients: Arc<DashMap<String, MuxHandle>>,
     web_sessions: Arc<DashMap<String, WebSession>>,
+    tunnel_manager: Arc<TunnelManager>,
 }
 
 #[derive(Clone)]
@@ -54,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         traffic,
         clients: Arc::new(DashMap::new()),
         web_sessions: Arc::new(DashMap::new()),
+        tunnel_manager: Arc::new(TunnelManager::new()),
     };
 
     info!(bridge_addr = %config.server.bridge_addr, "starting rps-controller");
@@ -70,17 +74,10 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(proxy_socks5::run(state.clone(), proxy));
     }
 
-    for tunnel in config.tunnels.iter().filter(|t| t.enabled).cloned() {
-        let state = state.clone();
-        match tunnel.mode {
-            TunnelMode::Tcp => {
-                tokio::spawn(proxy_tcp::run(state, tunnel));
-            }
-            TunnelMode::Udp => {
-                tokio::spawn(proxy_udp::run(state, tunnel));
-            }
-        }
-    }
+    state
+        .tunnel_manager
+        .start_enabled_from_db(state.clone())
+        .await?;
 
     tokio::signal::ctrl_c()
         .await

@@ -8,8 +8,9 @@ use rps_mux::MuxStream;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::watch,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 const TCP_COPY_BUF_SIZE: usize = 64 * 1024;
 
@@ -51,17 +52,30 @@ impl TrafficRecorder {
     }
 }
 
-pub async fn run(state: AppState, tunnel: TunnelConfig) {
-    if let Err(err) = run_inner(state, tunnel).await {
-        error!(error = %err, "tcp proxy stopped");
-    }
+pub async fn serve(
+    state: AppState,
+    tunnel: TunnelConfig,
+    listener: TcpListener,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    run_accept_loop(state, tunnel, listener, shutdown).await
 }
 
-async fn run_inner(state: AppState, tunnel: TunnelConfig) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(&tunnel.listen).await?;
+async fn run_accept_loop(
+    state: AppState,
+    tunnel: TunnelConfig,
+    listener: TcpListener,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     info!(tunnel_id = %tunnel.id, listen = %tunnel.listen, "tcp proxy listening");
     loop {
-        let (socket, remote_addr) = listener.accept().await?;
+        let (socket, remote_addr) = tokio::select! {
+            result = listener.accept() => result?,
+            _ = shutdown.changed() => {
+                info!(tunnel_id = %tunnel.id, listen = %tunnel.listen, "tcp proxy stopping");
+                break;
+            }
+        };
         let state = state.clone();
         let tunnel = tunnel.clone();
         tokio::spawn(async move {
@@ -71,6 +85,7 @@ async fn run_inner(state: AppState, tunnel: TunnelConfig) -> anyhow::Result<()> 
             }
         });
     }
+    Ok(())
 }
 
 pub async fn handle_tcp(
