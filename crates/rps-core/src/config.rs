@@ -21,9 +21,36 @@ pub struct ServerConfig {
     #[serde(default = "default_database_path")]
     pub database_path: String,
     #[serde(default)]
+    pub web_auth: WebAuthConfig,
+    #[serde(default)]
     pub http_proxy: Option<ProxyListenConfig>,
     #[serde(default)]
     pub socks5: Option<ProxyListenConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebAuthConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_admin_username")]
+    pub username: String,
+    #[serde(default = "default_admin_password")]
+    pub password: String,
+    pub totp_secret: Option<String>,
+    #[serde(default = "default_session_ttl_secs")]
+    pub session_ttl_secs: u64,
+}
+
+impl Default for WebAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            username: default_admin_username(),
+            password: default_admin_password(),
+            totp_secret: None,
+            session_ttl_secs: default_session_ttl_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -99,6 +126,18 @@ pub fn load_agent_config(path: impl AsRef<Path>) -> anyhow::Result<AgentConfigRo
 
 fn default_true() -> bool {
     true
+}
+
+fn default_admin_username() -> String {
+    "admin".to_string()
+}
+
+fn default_admin_password() -> String {
+    "change-me".to_string()
+}
+
+fn default_session_ttl_secs() -> u64 {
+    24 * 60 * 60
 }
 
 fn default_reconnect_interval() -> u64 {

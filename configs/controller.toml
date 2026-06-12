@@ -4,6 +4,12 @@ web_addr = "127.0.0.1:8080"
 web_dir = "web/dist"
 database_path = "data/rps.db"
 
+[server.web_auth]
+enabled = true
+username = "admin"
+password = "change-me"
+session_ttl_secs = 86400
+
 [server.http_proxy]
 listen = "127.0.0.1:10082"
 client_id = "client-1"

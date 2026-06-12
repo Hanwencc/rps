@@ -1,20 +1,57 @@
 import type {
+  AuthStatusResponse,
   ClientResponse,
   ConsoleData,
   CreateClientPayload,
   CreateProxyAccountPayload,
+  CreateTunnelPayload,
+  LoginPayload,
+  LoginResponse,
   ProxyAccountResponse,
   ProxyResponse,
   StatusResponse,
   TunnelResponse,
 } from "./types";
 
-async function fetchJson<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+export class HttpError extends Error {
+  status: number;
+
+  constructor(path: string, status: number, message: string) {
+    super(message || `${path} 返回 ${status}`);
+    this.status = status;
+  }
+}
+
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    ...init,
+    headers: {
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...init?.headers,
+    },
+  });
   if (!response.ok) {
-    throw new Error(`${path} 返回 ${response.status}`);
+    throw new HttpError(path, response.status, await response.text());
   }
   return (await response.json()) as T;
+}
+
+export async function authStatus(): Promise<AuthStatusResponse> {
+  return fetchJson<AuthStatusResponse>("/api/auth/status");
+}
+
+export async function login(payload: LoginPayload): Promise<LoginResponse> {
+  return fetchJson<LoginResponse>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function logout(): Promise<AuthStatusResponse> {
+  return fetchJson<AuthStatusResponse>("/api/auth/logout", {
+    method: "POST",
+  });
 }
 
 export async function loadConsoleData(): Promise<ConsoleData> {
@@ -29,27 +66,24 @@ export async function loadConsoleData(): Promise<ConsoleData> {
 }
 
 export async function createClient(payload: CreateClientPayload): Promise<ClientResponse> {
-  const response = await fetch("/api/clients", {
+  return fetchJson<ClientResponse>("/api/clients", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  return (await response.json()) as ClientResponse;
+}
+
+export async function createTunnel(payload: CreateTunnelPayload): Promise<TunnelResponse> {
+  return fetchJson<TunnelResponse>("/api/tunnels", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function createProxyAccount(
   payload: CreateProxyAccountPayload,
 ): Promise<ProxyAccountResponse> {
-  const response = await fetch("/api/proxy-accounts", {
+  return fetchJson<ProxyAccountResponse>("/api/proxy-accounts", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  return (await response.json()) as ProxyAccountResponse;
 }

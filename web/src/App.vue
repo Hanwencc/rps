@@ -1,16 +1,27 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { createClient, createProxyAccount, loadConsoleData } from "./api";
+import {
+  HttpError,
+  authStatus,
+  createClient,
+  createProxyAccount,
+  createTunnel,
+  loadConsoleData,
+  login,
+} from "./api";
 import PageHeader from "./components/PageHeader.vue";
 import Sidebar from "./components/Sidebar.vue";
 import ClientsPage from "./pages/ClientsPage.vue";
 import DashboardPage from "./pages/DashboardPage.vue";
+import LoginPage from "./pages/LoginPage.vue";
 import ProxyPage from "./pages/ProxyPage.vue";
 import TunnelsPage from "./pages/TunnelsPage.vue";
 import type {
   ClientResponse,
   CreateClientPayload,
   CreateProxyAccountPayload,
+  CreateTunnelPayload,
+  LoginPayload,
   MenuKey,
   ProxyAccountResponse,
   ProxyResponse,
@@ -28,6 +39,12 @@ const menuLabels: Record<MenuKey, string> = {
 };
 
 const activeMenu = ref<MenuKey>("dashboard");
+const authenticated = ref(false);
+const authLoading = ref(true);
+const loginLoading = ref(false);
+const loginError = ref<string | null>(null);
+const requires2fa = ref(false);
+const securityKeyAvailable = ref(false);
 const status = ref<StatusResponse | null>(null);
 const clients = ref<ClientResponse[]>([]);
 const tunnels = ref<TunnelResponse[]>([]);
@@ -36,8 +53,10 @@ const proxyAccounts = ref<ProxyAccountResponse[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
 const createClientError = ref<string | null>(null);
+const createTunnelError = ref<string | null>(null);
 const createProxyError = ref<string | null>(null);
 const creatingClient = ref(false);
+const creatingTunnel = ref(false);
 const creatingProxy = ref(false);
 const lastUpdated = ref<string | null>(null);
 let refreshTimer: number | undefined;
@@ -47,6 +66,9 @@ const tcpTunnels = computed(() => tunnels.value.filter((tunnel) => tunnel.mode =
 const udpTunnels = computed(() => tunnels.value.filter((tunnel) => tunnel.mode === "udp"));
 
 async function refresh() {
+  if (!authenticated.value) {
+    return;
+  }
   error.value = null;
   try {
     const data = await loadConsoleData();
@@ -57,9 +79,36 @@ async function refresh() {
     proxyAccounts.value = data.proxyAccounts;
     lastUpdated.value = new Date().toLocaleTimeString();
   } catch (err) {
+    if (err instanceof HttpError && err.status === 401) {
+      authenticated.value = false;
+      stopRefreshTimer();
+      return;
+    }
     error.value = err instanceof Error ? err.message : "加载控制端状态失败";
   } finally {
     loading.value = false;
+  }
+}
+
+async function handleLogin(payload: LoginPayload) {
+  loginError.value = null;
+  loginLoading.value = true;
+  try {
+    const response = await login(payload);
+    securityKeyAvailable.value = response.security_key_available;
+    if (response.requires_2fa) {
+      requires2fa.value = true;
+      return;
+    }
+    authenticated.value = response.authenticated;
+    requires2fa.value = false;
+    loading.value = true;
+    startRefreshTimer();
+    await refresh();
+  } catch (err) {
+    loginError.value = err instanceof Error ? err.message : "登录失败";
+  } finally {
+    loginLoading.value = false;
   }
 }
 
@@ -76,6 +125,19 @@ async function handleCreateClient(payload: CreateClientPayload) {
   }
 }
 
+async function handleCreateTunnel(payload: CreateTunnelPayload) {
+  createTunnelError.value = null;
+  creatingTunnel.value = true;
+  try {
+    await createTunnel(payload);
+    await refresh();
+  } catch (err) {
+    createTunnelError.value = err instanceof Error ? err.message : "创建隧道失败";
+  } finally {
+    creatingTunnel.value = false;
+  }
+}
+
 async function handleCreateProxyAccount(payload: CreateProxyAccountPayload) {
   createProxyError.value = null;
   creatingProxy.value = true;
@@ -89,20 +151,49 @@ async function handleCreateProxyAccount(payload: CreateProxyAccountPayload) {
   }
 }
 
-onMounted(() => {
-  void refresh();
+function startRefreshTimer() {
+  stopRefreshTimer();
   refreshTimer = window.setInterval(refresh, 5000);
-});
+}
 
-onUnmounted(() => {
+function stopRefreshTimer() {
   if (refreshTimer !== undefined) {
     window.clearInterval(refreshTimer);
+    refreshTimer = undefined;
+  }
+}
+
+onMounted(async () => {
+  try {
+    const auth = await authStatus();
+    authenticated.value = auth.authenticated;
+    securityKeyAvailable.value = auth.security_key_available;
+    if (auth.authenticated) {
+      startRefreshTimer();
+      await refresh();
+    }
+  } catch (err) {
+    loginError.value = err instanceof Error ? err.message : "读取登录状态失败";
+  } finally {
+    authLoading.value = false;
+    loading.value = false;
   }
 });
+
+onUnmounted(stopRefreshTimer);
 </script>
 
 <template>
-  <main class="min-h-screen bg-[#eef1f5] text-slate-800">
+  <LoginPage
+    v-if="!authenticated"
+    :error="loginError"
+    :loading="authLoading || loginLoading"
+    :requires2fa="requires2fa"
+    :security-key-available="securityKeyAvailable"
+    @login="handleLogin"
+  />
+
+  <main v-else class="min-h-screen bg-[#eef1f5] text-slate-800">
     <div class="flex min-h-screen">
       <Sidebar :active-menu="activeMenu" @select="activeMenu = $event" />
 
@@ -137,13 +228,23 @@ onUnmounted(() => {
             />
             <TunnelsPage
               v-else-if="activeMenu === 'tcp'"
+              :clients="clients"
+              :creating="creatingTunnel"
+              :error="createTunnelError"
+              mode="tcp"
               title="TCP 隧道"
               :tunnels="tcpTunnels"
+              @create="handleCreateTunnel"
             />
             <TunnelsPage
               v-else-if="activeMenu === 'udp'"
+              :clients="clients"
+              :creating="creatingTunnel"
+              :error="createTunnelError"
+              mode="udp"
               title="UDP 隧道"
               :tunnels="udpTunnels"
+              @create="handleCreateTunnel"
             />
             <ProxyPage
               v-else-if="activeMenu === 'http'"

@@ -58,6 +58,16 @@ pub struct NewClient {
 }
 
 #[derive(Debug, Clone)]
+pub struct NewTunnel {
+    pub id: String,
+    pub client_id: String,
+    pub mode: TunnelMode,
+    pub listen: String,
+    pub target: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewProxyAccount {
     pub id: String,
     pub kind: String,
@@ -446,6 +456,35 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_tunnel).collect()
+    }
+
+    pub async fn create_tunnel(&self, input: NewTunnel) -> anyhow::Result<DbTunnel> {
+        let now = now_secs();
+        sqlx::query(
+            r#"
+            insert into tunnels
+                (id, client_id, mode, listen, target, enabled, created_at, updated_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&input.id)
+        .bind(&input.client_id)
+        .bind(tunnel_mode_to_str(&input.mode))
+        .bind(&input.listen)
+        .bind(&input.target)
+        .bind(bool_to_i64(input.enabled))
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        let row = sqlx::query(
+            "select id, client_id, mode, listen, target, enabled from tunnels where id = ?",
+        )
+        .bind(&input.id)
+        .fetch_one(&self.pool)
+        .await?;
+        row_to_tunnel(row)
     }
 
     pub async fn count_enabled_tunnels(&self) -> anyhow::Result<usize> {

@@ -32,6 +32,15 @@ export type TunnelResponse = {
   enabled: boolean;
 };
 
+export type CreateTunnelPayload = {
+  id: string | null;
+  client_id: string;
+  mode: "tcp" | "udp";
+  listen: string;
+  target: string;
+  enabled: boolean;
+};
+
 export type ProxyListenConfig = {
   listen: string;
   client_id: string;
@@ -73,6 +82,26 @@ export type ConsoleData = {
   tunnels: TunnelResponse[];
   proxy: ProxyResponse;
   proxyAccounts: ProxyAccountResponse[];
+};
+
+export type AuthStatusResponse = {
+  authenticated: boolean;
+  username: string | null;
+  two_factor_enabled: boolean;
+  security_key_available: boolean;
+};
+
+export type LoginPayload = {
+  username: string;
+  password: string;
+  otp_code: string | null;
+};
+
+export type LoginResponse = {
+  authenticated: boolean;
+  requires_2fa: boolean;
+  username: string | null;
+  security_key_available: boolean;
 };
 
 export type CreateClientPayload = {

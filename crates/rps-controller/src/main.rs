@@ -29,6 +29,13 @@ pub(crate) struct AppState {
     db: Database,
     traffic: TrafficAggregator,
     clients: Arc<DashMap<String, MuxHandle>>,
+    web_sessions: Arc<DashMap<String, WebSession>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct WebSession {
+    username: String,
+    expires_at: i64,
 }
 
 #[tokio::main]
@@ -46,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         db: db.clone(),
         traffic,
         clients: Arc::new(DashMap::new()),
+        web_sessions: Arc::new(DashMap::new()),
     };
 
     info!(bridge_addr = %config.server.bridge_addr, "starting rps-controller");

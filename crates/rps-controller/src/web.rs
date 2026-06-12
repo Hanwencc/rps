@@ -1,16 +1,23 @@
-use crate::AppState;
+use crate::{AppState, WebSession, proxy_tcp, proxy_udp};
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
-    routing::get,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    routing::{get, post},
 };
-use rps_core::config::{ProxyListenConfig, TunnelMode};
+use hmac::{Hmac, Mac};
+use rps_core::config::{ProxyListenConfig, TunnelConfig, TunnelMode};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, path::PathBuf};
+use sha1::Sha1;
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info};
 use uuid::Uuid;
+
+const SESSION_COOKIE: &str = "rps_session";
+const TOTP_STEP_SECS: i64 = 30;
+const TOTP_DIGITS: u32 = 6;
+type HmacSha1 = Hmac<Sha1>;
 
 #[derive(Debug, Serialize)]
 struct StatusResponse {
@@ -47,6 +54,16 @@ struct CreateClientRequest {
     compress: bool,
     #[serde(default)]
     encrypt: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTunnelRequest {
+    id: Option<String>,
+    client_id: String,
+    mode: TunnelMode,
+    listen: String,
+    target: Option<String>,
+    enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,6 +108,29 @@ struct CreateProxyAccountRequest {
     remark: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+    otp_code: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LoginResponse {
+    authenticated: bool,
+    requires_2fa: bool,
+    username: Option<String>,
+    security_key_available: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthStatusResponse {
+    authenticated: bool,
+    username: Option<String>,
+    two_factor_enabled: bool,
+    security_key_available: bool,
+}
+
 pub async fn run(state: AppState) {
     if let Err(err) = run_inner(state).await {
         error!(error = %err, "web console stopped");
@@ -103,9 +143,12 @@ async fn run_inner(state: AppState) -> anyhow::Result<()> {
     let index = web_dir.join("index.html");
 
     let app = Router::new()
+        .route("/api/auth/status", get(auth_status))
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/logout", post(logout))
         .route("/api/status", get(status))
         .route("/api/clients", get(clients).post(create_client))
-        .route("/api/tunnels", get(tunnels))
+        .route("/api/tunnels", get(tunnels).post(create_tunnel))
         .route("/api/proxy", get(proxy))
         .route(
             "/api/proxy-accounts",
@@ -120,7 +163,118 @@ async fn run_inner(state: AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn status(State(state): State<AppState>) -> Result<Json<StatusResponse>, ApiError> {
+async fn auth_status(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<AuthStatusResponse>, ApiError> {
+    let username = authenticated_username(&headers, &state);
+    Ok(Json(AuthStatusResponse {
+        authenticated: username.is_some() || !state.config.server.web_auth.enabled,
+        username,
+        two_factor_enabled: two_factor_enabled(&state),
+        security_key_available: false,
+    }))
+}
+
+async fn login(
+    State(state): State<AppState>,
+    Json(request): Json<LoginRequest>,
+) -> Result<(HeaderMap, Json<LoginResponse>), ApiError> {
+    let auth = &state.config.server.web_auth;
+    if !auth.enabled {
+        return Ok((
+            HeaderMap::new(),
+            Json(LoginResponse {
+                authenticated: true,
+                requires_2fa: false,
+                username: Some(auth.username.clone()),
+                security_key_available: false,
+            }),
+        ));
+    }
+
+    if request.username != auth.username || request.password != auth.password {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "用户名或密码错误".to_string(),
+        });
+    }
+
+    if let Some(secret) = normalized_totp_secret(&state) {
+        let Some(code) = request
+            .otp_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            return Ok((
+                HeaderMap::new(),
+                Json(LoginResponse {
+                    authenticated: false,
+                    requires_2fa: true,
+                    username: None,
+                    security_key_available: false,
+                }),
+            ));
+        };
+
+        if !verify_totp(&secret, code)? {
+            return Err(ApiError {
+                status: StatusCode::UNAUTHORIZED,
+                message: "动态验证码错误".to_string(),
+            });
+        }
+    }
+
+    let token = Uuid::new_v4().to_string();
+    let ttl = auth.session_ttl_secs.max(60);
+    let expires_at = now_secs() + ttl as i64;
+    state.web_sessions.insert(
+        token.clone(),
+        WebSession {
+            username: auth.username.clone(),
+            expires_at,
+        },
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, session_cookie(&token, ttl)?);
+    Ok((
+        headers,
+        Json(LoginResponse {
+            authenticated: true,
+            requires_2fa: false,
+            username: Some(auth.username.clone()),
+            security_key_available: false,
+        }),
+    ))
+}
+
+async fn logout(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<(HeaderMap, Json<AuthStatusResponse>), ApiError> {
+    if let Some(token) = session_token(&headers) {
+        state.web_sessions.remove(&token);
+    }
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(header::SET_COOKIE, expired_session_cookie()?);
+    Ok((
+        response_headers,
+        Json(AuthStatusResponse {
+            authenticated: false,
+            username: None,
+            two_factor_enabled: two_factor_enabled(&state),
+            security_key_available: false,
+        }),
+    ))
+}
+
+async fn status(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<StatusResponse>, ApiError> {
+    require_auth(&headers, &state)?;
     let configured_clients = state.db.count_clients().await?;
     let enabled_tunnels = state.db.count_enabled_tunnels().await?;
     Ok(Json(StatusResponse {
@@ -144,7 +298,11 @@ async fn status(State(state): State<AppState>) -> Result<Json<StatusResponse>, A
     }))
 }
 
-async fn clients(State(state): State<AppState>) -> Result<Json<Vec<ClientResponse>>, ApiError> {
+async fn clients(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ClientResponse>>, ApiError> {
+    require_auth(&headers, &state)?;
     let clients = state.db.list_clients().await?;
     let mut response = Vec::with_capacity(clients.len());
     for client in clients {
@@ -154,9 +312,11 @@ async fn clients(State(state): State<AppState>) -> Result<Json<Vec<ClientRespons
 }
 
 async fn create_client(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(request): Json<CreateClientRequest>,
 ) -> Result<(StatusCode, Json<ClientResponse>), ApiError> {
+    require_auth(&headers, &state)?;
     let id = Uuid::new_v4().to_string();
     let psk = request
         .psk
@@ -181,24 +341,70 @@ async fn create_client(
     ))
 }
 
-async fn tunnels(State(state): State<AppState>) -> Result<Json<Vec<TunnelResponse>>, ApiError> {
+async fn tunnels(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<TunnelResponse>>, ApiError> {
+    require_auth(&headers, &state)?;
     let tunnels = state.db.list_tunnels().await?;
-    Ok(Json(
-        tunnels
-            .into_iter()
-            .map(|tunnel| TunnelResponse {
-                id: tunnel.id,
-                client_id: tunnel.client_id,
-                mode: tunnel.mode,
-                listen: tunnel.listen,
-                target: tunnel.target,
-                enabled: tunnel.enabled,
-            })
-            .collect(),
-    ))
+    Ok(Json(tunnels.into_iter().map(tunnel_response).collect()))
 }
 
-async fn proxy(State(state): State<AppState>) -> Result<Json<ProxyResponse>, ApiError> {
+async fn create_tunnel(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(request): Json<CreateTunnelRequest>,
+) -> Result<(StatusCode, Json<TunnelResponse>), ApiError> {
+    require_auth(&headers, &state)?;
+    if state.db.get_client(&request.client_id).await?.is_none() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("client {} not found", request.client_id),
+        });
+    }
+    let target = request
+        .target
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "target is required".to_string(),
+        })?;
+    let tunnel = state
+        .db
+        .create_tunnel(crate::db::NewTunnel {
+            id: request
+                .id
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            client_id: request.client_id,
+            mode: request.mode,
+            listen: request.listen,
+            target: Some(target),
+            enabled: request.enabled.unwrap_or(true),
+        })
+        .await?;
+
+    if tunnel.enabled {
+        let tunnel_config = tunnel_config(&tunnel);
+        let state_for_task = state.clone();
+        match tunnel_config.mode {
+            TunnelMode::Tcp => {
+                tokio::spawn(proxy_tcp::run(state_for_task, tunnel_config));
+            }
+            TunnelMode::Udp => {
+                tokio::spawn(proxy_udp::run(state_for_task, tunnel_config));
+            }
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(tunnel_response(tunnel))))
+}
+
+async fn proxy(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<ProxyResponse>, ApiError> {
+    require_auth(&headers, &state)?;
     Ok(Json(ProxyResponse {
         http_proxy: state.db.get_proxy("http").await?,
         socks5: state.db.get_proxy("socks5").await?,
@@ -206,9 +412,11 @@ async fn proxy(State(state): State<AppState>) -> Result<Json<ProxyResponse>, Api
 }
 
 async fn proxy_accounts(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<ProxyAccountsQuery>,
 ) -> Result<Json<Vec<ProxyAccountResponse>>, ApiError> {
+    require_auth(&headers, &state)?;
     let accounts = state.db.list_proxy_accounts(query.kind.as_deref()).await?;
     Ok(Json(
         accounts.into_iter().map(proxy_account_response).collect(),
@@ -216,9 +424,11 @@ async fn proxy_accounts(
 }
 
 async fn create_proxy_account(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(request): Json<CreateProxyAccountRequest>,
 ) -> Result<(StatusCode, Json<ProxyAccountResponse>), ApiError> {
+    require_auth(&headers, &state)?;
     if state.db.get_client(&request.client_id).await?.is_none() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -244,6 +454,28 @@ async fn create_proxy_account(
         })
         .await?;
     Ok((StatusCode::CREATED, Json(proxy_account_response(account))))
+}
+
+fn tunnel_response(tunnel: crate::db::DbTunnel) -> TunnelResponse {
+    TunnelResponse {
+        id: tunnel.id,
+        client_id: tunnel.client_id,
+        mode: tunnel.mode,
+        listen: tunnel.listen,
+        target: tunnel.target,
+        enabled: tunnel.enabled,
+    }
+}
+
+fn tunnel_config(tunnel: &crate::db::DbTunnel) -> TunnelConfig {
+    TunnelConfig {
+        id: tunnel.id.clone(),
+        client_id: tunnel.client_id.clone(),
+        mode: tunnel.mode.clone(),
+        listen: tunnel.listen.clone(),
+        target: tunnel.target.clone(),
+        enabled: tunnel.enabled,
+    }
 }
 
 async fn client_response(
@@ -288,6 +520,152 @@ fn random_proxy_secret() -> String {
 
 fn random_psk() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn require_auth(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
+    if !state.config.server.web_auth.enabled {
+        return Ok(());
+    }
+    if authenticated_username(headers, state).is_some() {
+        return Ok(());
+    }
+    Err(ApiError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "unauthorized".to_string(),
+    })
+}
+
+fn authenticated_username(headers: &HeaderMap, state: &AppState) -> Option<String> {
+    let token = session_token(headers)?;
+    let session = state.web_sessions.get(&token)?;
+    if session.expires_at < now_secs() {
+        drop(session);
+        state.web_sessions.remove(&token);
+        return None;
+    }
+    Some(session.username.clone())
+}
+
+fn session_token(headers: &HeaderMap) -> Option<String> {
+    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
+    for cookie in cookies.split(';') {
+        let (name, value) = cookie.trim().split_once('=')?;
+        if name == SESSION_COOKIE && !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn session_cookie(token: &str, ttl_secs: u64) -> Result<HeaderValue, ApiError> {
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}={token}; Path=/; Max-Age={ttl_secs}; HttpOnly; SameSite=Lax"
+    ))
+    .map_err(|err| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: err.to_string(),
+    })
+}
+
+fn expired_session_cookie() -> Result<HeaderValue, ApiError> {
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+    ))
+    .map_err(|err| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: err.to_string(),
+    })
+}
+
+fn two_factor_enabled(state: &AppState) -> bool {
+    normalized_totp_secret(state).is_some()
+}
+
+fn normalized_totp_secret(state: &AppState) -> Option<String> {
+    state
+        .config
+        .server
+        .web_auth
+        .totp_secret
+        .as_ref()
+        .map(|secret| secret.trim().replace(' ', ""))
+        .filter(|secret| !secret.is_empty())
+}
+
+fn verify_totp(secret: &str, code: &str) -> Result<bool, ApiError> {
+    let secret = decode_base32(secret)?;
+    let code = code.trim();
+    if code.len() != TOTP_DIGITS as usize || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(false);
+    }
+
+    let now_step = now_secs() / TOTP_STEP_SECS;
+    for step in [now_step - 1, now_step, now_step + 1] {
+        if totp_at_step(&secret, step as u64)? == code {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn totp_at_step(secret: &[u8], step: u64) -> Result<String, ApiError> {
+    let mut mac = HmacSha1::new_from_slice(secret).map_err(|err| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: err.to_string(),
+    })?;
+    mac.update(&step.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = (digest[19] & 0x0f) as usize;
+    let value = ((u32::from(digest[offset]) & 0x7f) << 24)
+        | (u32::from(digest[offset + 1]) << 16)
+        | (u32::from(digest[offset + 2]) << 8)
+        | u32::from(digest[offset + 3]);
+    let modulo = 10_u32.pow(TOTP_DIGITS);
+    Ok(format!("{:06}", value % modulo))
+}
+
+fn decode_base32(input: &str) -> Result<Vec<u8>, ApiError> {
+    let mut bits = 0_u32;
+    let mut bit_count = 0_u8;
+    let mut out = Vec::new();
+
+    for byte in input.bytes() {
+        if byte == b'=' {
+            break;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a',
+            b'2'..=b'7' => byte - b'2' + 26,
+            _ => {
+                return Err(ApiError {
+                    status: StatusCode::BAD_REQUEST,
+                    message: "invalid totp secret".to_string(),
+                });
+            }
+        };
+        bits = (bits << 5) | u32::from(value);
+        bit_count += 5;
+        while bit_count >= 8 {
+            bit_count -= 8;
+            out.push(((bits >> bit_count) & 0xff) as u8);
+        }
+    }
+
+    if out.is_empty() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid totp secret".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs() as i64
 }
 
 #[derive(Debug)]
