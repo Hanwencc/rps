@@ -11,6 +11,8 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+const TCP_COPY_BUF_SIZE: usize = 64 * 1024;
+
 #[derive(Clone)]
 pub struct StreamRoute {
     pub tunnel_id: String,
@@ -42,15 +44,10 @@ impl TrafficRecorder {
         }
     }
 
-    pub async fn add(&self, rx_bytes: u64, tx_bytes: u64) {
-        if let Err(err) = self
-            .state
-            .db
-            .add_traffic(&self.client_id, &self.tunnel_id, rx_bytes, tx_bytes)
-            .await
-        {
-            debug!(error = %err, "failed to record traffic");
-        }
+    pub fn add(&self, rx_bytes: u64, tx_bytes: u64) {
+        self.state
+            .traffic
+            .record(&self.client_id, &self.tunnel_id, rx_bytes, tx_bytes);
     }
 }
 
@@ -114,19 +111,23 @@ pub async fn open_stream(
     };
     let payload = serde_json::to_vec(&request)?;
     let stream = mux.open_stream(Bytes::from(payload)).await?;
-    if let Err(err) = state
-        .db
-        .record_stream_open(
-            &route.client_id,
-            &route.tunnel_id,
-            &request.protocol,
-            &request.target,
-            &request.remote_addr,
-        )
-        .await
-    {
-        debug!(error = %err, "failed to record stream session");
-    }
+    let db = state.db.clone();
+    let client_id = route.client_id.clone();
+    let tunnel_id = route.tunnel_id.clone();
+    tokio::spawn(async move {
+        if let Err(err) = db
+            .record_stream_open(
+                &client_id,
+                &tunnel_id,
+                &request.protocol,
+                &request.target,
+                &request.remote_addr,
+            )
+            .await
+        {
+            debug!(error = %err, "failed to record stream session");
+        }
+    });
     Ok(stream)
 }
 
@@ -136,12 +137,13 @@ pub async fn pipe_tcp_mux(
     initial_data: Option<Bytes>,
     recorder: Option<TrafficRecorder>,
 ) -> anyhow::Result<()> {
+    socket.set_nodelay(true)?;
     let (mut tcp_read, mut tcp_write) = socket.into_split();
     let (mux_write, mut mux_read) = stream.split();
 
     if let Some(data) = initial_data {
         if let Some(recorder) = &recorder {
-            recorder.add(0, data.len() as u64).await;
+            recorder.add(0, data.len() as u64);
         }
         mux_write.send_data(data).await?;
     }
@@ -150,7 +152,7 @@ pub async fn pipe_tcp_mux(
         let mux_write = mux_write.clone();
         let recorder = recorder.clone();
         tokio::spawn(async move {
-            let mut buf = vec![0_u8; 16 * 1024];
+            let mut buf = vec![0_u8; TCP_COPY_BUF_SIZE];
             loop {
                 let n = tcp_read.read(&mut buf).await?;
                 if n == 0 {
@@ -161,7 +163,7 @@ pub async fn pipe_tcp_mux(
                     .send_data(Bytes::copy_from_slice(&buf[..n]))
                     .await?;
                 if let Some(recorder) = &recorder {
-                    recorder.add(0, n as u64).await;
+                    recorder.add(0, n as u64);
                 }
             }
             anyhow::Ok(())
@@ -173,7 +175,7 @@ pub async fn pipe_tcp_mux(
         while let Some(data) = mux_read.recv_data().await {
             tcp_write.write_all(&data).await?;
             if let Some(recorder) = &recorder {
-                recorder.add(data.len() as u64, 0).await;
+                recorder.add(data.len() as u64, 0);
             }
         }
         anyhow::Ok(())

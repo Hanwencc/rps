@@ -89,19 +89,23 @@ async fn run_inner(state: AppState, tunnel: TunnelConfig) -> anyhow::Result<()> 
             let stream = mux
                 .open_stream(Bytes::from(serde_json::to_vec(&request)?))
                 .await?;
-            if let Err(err) = state
-                .db
-                .record_stream_open(
-                    &tunnel.client_id,
-                    &tunnel.id,
-                    &request.protocol,
-                    &request.target,
-                    &request.remote_addr,
-                )
-                .await
-            {
-                warn!(%remote_addr, error = %err, "failed to record udp stream session");
-            }
+            let db = state.db.clone();
+            let client_id = tunnel.client_id.clone();
+            let tunnel_id = tunnel.id.clone();
+            tokio::spawn(async move {
+                if let Err(err) = db
+                    .record_stream_open(
+                        &client_id,
+                        &tunnel_id,
+                        &request.protocol,
+                        &request.target,
+                        &request.remote_addr,
+                    )
+                    .await
+                {
+                    warn!(%remote_addr, error = %err, "failed to record udp stream session");
+                }
+            });
             let (writer, mut reader) = stream.split();
             let last_seen = Arc::new(AtomicU64::new(now_secs()));
             sessions.insert(
@@ -120,7 +124,7 @@ async fn run_inner(state: AppState, tunnel: TunnelConfig) -> anyhow::Result<()> 
                         warn!(%remote_addr, error = %err, "udp response write failed");
                         break;
                     }
-                    response_recorder.add(packet.len() as u64, 0).await;
+                    response_recorder.add(packet.len() as u64, 0);
                     last_seen.store(now_secs(), Ordering::Relaxed);
                 }
                 sessions.remove(&remote_addr);
@@ -132,7 +136,7 @@ async fn run_inner(state: AppState, tunnel: TunnelConfig) -> anyhow::Result<()> 
             warn!(%remote_addr, error = %err, "udp send to mux failed");
             sessions.remove(&remote_addr);
         } else {
-            recorder.add(0, data_len).await;
+            recorder.add(0, data_len);
         }
     }
 }

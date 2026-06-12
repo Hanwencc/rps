@@ -38,6 +38,7 @@ async fn handle_http_proxy(
     mut socket: TcpStream,
     remote_addr: String,
 ) -> anyhow::Result<()> {
+    socket.set_nodelay(true)?;
     let header = read_header(&mut socket).await?;
     let header_text = std::str::from_utf8(&header)?;
     let route = match authenticated_route(&state, &route, header_text).await? {

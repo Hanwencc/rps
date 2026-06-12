@@ -19,6 +19,8 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+const TCP_COPY_BUF_SIZE: usize = 64 * 1024;
+
 #[derive(Debug, Parser)]
 struct Args {
     #[arg(long, default_value = "configs/agent.toml")]
@@ -97,6 +99,7 @@ async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
 
 async fn connect_role(config: &AgentConfig, role: HelloRole) -> anyhow::Result<TcpStream> {
     let mut stream = TcpStream::connect(&config.server_addr).await?;
+    stream.set_nodelay(true)?;
     let hello = Hello::new(role, config.vkey.clone());
     write_json(&mut stream, &hello).await?;
     let ack: HelloAck = read_json(&mut stream).await?;
@@ -147,6 +150,7 @@ async fn handle_tcp_target(
     request: OpenRequest,
 ) -> anyhow::Result<()> {
     let target = TcpStream::connect(&request.target).await?;
+    target.set_nodelay(true)?;
     let (mut target_read, mut target_write) = target.into_split();
 
     let uplink = tokio::spawn(async move {
@@ -157,7 +161,7 @@ async fn handle_tcp_target(
     });
 
     let downlink = tokio::spawn(async move {
-        let mut buf = vec![0_u8; 16 * 1024];
+        let mut buf = vec![0_u8; TCP_COPY_BUF_SIZE];
         loop {
             let n = target_read.read(&mut buf).await?;
             if n == 0 {

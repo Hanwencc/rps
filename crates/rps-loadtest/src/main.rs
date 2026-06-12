@@ -1,4 +1,5 @@
 use anyhow::Context;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use clap::{Parser, ValueEnum};
 use std::{
     fmt::Write as _,
@@ -48,6 +49,14 @@ struct Args {
     udp_datagram_bytes: usize,
     #[arg(long, default_value_t = 5)]
     timeout_secs: u64,
+    #[arg(long)]
+    http_proxy_username: Option<String>,
+    #[arg(long)]
+    http_proxy_password: Option<String>,
+    #[arg(long)]
+    socks5_username: Option<String>,
+    #[arg(long)]
+    socks5_password: Option<String>,
     #[arg(
         long,
         value_enum,
@@ -487,9 +496,10 @@ async fn udp_throughput(args: &Args, worker: usize) -> anyhow::Result<usize> {
 async fn http_proxy_throughput(args: &Args) -> anyhow::Result<usize> {
     let mut stream = TcpStream::connect((args.host.as_str(), args.http_proxy_port)).await?;
     let target = format!("{}:{}", args.target_host, args.target_http_port);
+    let auth = http_proxy_auth_header(args)?;
     let request = format!(
-        "GET http://{target}/bytes/{} HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n",
-        args.throughput_bytes
+        "GET http://{target}/bytes/{} HTTP/1.1\r\nHost: {target}\r\n{auth}Connection: close\r\n\r\n",
+        args.throughput_bytes,
     );
     stream.write_all(request.as_bytes()).await?;
     read_http_body_len(stream, args.throughput_bytes).await
@@ -574,8 +584,10 @@ async fn socks5_udp_echo_with_socket(
 async fn http_proxy(args: &Args) -> anyhow::Result<()> {
     let mut stream = TcpStream::connect((args.host.as_str(), args.http_proxy_port)).await?;
     let target = format!("{}:{}", args.target_host, args.target_http_port);
-    let request =
-        format!("GET http://{target}/ HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n");
+    let auth = http_proxy_auth_header(args)?;
+    let request = format!(
+        "GET http://{target}/ HTTP/1.1\r\nHost: {target}\r\n{auth}Connection: close\r\n\r\n"
+    );
     stream.write_all(request.as_bytes()).await?;
     let response = read_to_end(stream).await?;
     let text = String::from_utf8_lossy(&response);
@@ -602,10 +614,7 @@ async fn socks5_http(args: &Args) -> anyhow::Result<()> {
 
 async fn socks5_connect(args: &Args) -> anyhow::Result<TcpStream> {
     let mut stream = TcpStream::connect((args.host.as_str(), args.socks5_port)).await?;
-    stream.write_all(&[5, 1, 0]).await?;
-    let mut handshake = [0; 2];
-    stream.read_exact(&mut handshake).await?;
-    anyhow::ensure!(handshake == [5, 0], "socks5 auth negotiation failed");
+    socks5_authenticate(args, &mut stream).await?;
 
     let host = args.target_host.as_bytes();
     anyhow::ensure!(host.len() <= u8::MAX as usize, "target host too long");
@@ -624,10 +633,7 @@ async fn socks5_connect(args: &Args) -> anyhow::Result<TcpStream> {
 
 async fn socks5_udp_associate(args: &Args) -> anyhow::Result<(TcpStream, UdpSocket)> {
     let mut stream = TcpStream::connect((args.host.as_str(), args.socks5_port)).await?;
-    stream.write_all(&[5, 1, 0]).await?;
-    let mut handshake = [0; 2];
-    stream.read_exact(&mut handshake).await?;
-    anyhow::ensure!(handshake == [5, 0], "socks5 auth negotiation failed");
+    socks5_authenticate(args, &mut stream).await?;
 
     stream.write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
 
@@ -647,6 +653,73 @@ async fn socks5_udp_associate(args: &Args) -> anyhow::Result<(TcpStream, UdpSock
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect((relay_host.as_str(), relay_port)).await?;
     Ok((stream, socket))
+}
+
+fn http_proxy_auth_header(args: &Args) -> anyhow::Result<String> {
+    let Some(username) = &args.http_proxy_username else {
+        anyhow::ensure!(
+            args.http_proxy_password.is_none(),
+            "--http-proxy-password requires --http-proxy-username"
+        );
+        return Ok(String::new());
+    };
+    let password = args
+        .http_proxy_password
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--http-proxy-username requires --http-proxy-password"))?;
+    let encoded = BASE64.encode(format!("{username}:{password}"));
+    Ok(format!("Proxy-Authorization: Basic {encoded}\r\n"))
+}
+
+async fn socks5_authenticate(args: &Args, stream: &mut TcpStream) -> anyhow::Result<()> {
+    let has_auth = args.socks5_username.is_some() || args.socks5_password.is_some();
+    if has_auth {
+        stream.write_all(&[5, 2, 0, 2]).await?;
+    } else {
+        stream.write_all(&[5, 1, 0]).await?;
+    }
+
+    let mut handshake = [0; 2];
+    stream.read_exact(&mut handshake).await?;
+    anyhow::ensure!(handshake[0] == 5, "bad socks5 auth version");
+    match handshake[1] {
+        0 => Ok(()),
+        2 => {
+            let username = args.socks5_username.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("socks5 server requires username/password authentication")
+            })?;
+            let password = args
+                .socks5_password
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("--socks5-username requires --socks5-password"))?;
+            anyhow::ensure!(
+                username.len() <= u8::MAX as usize,
+                "socks5 username too long"
+            );
+            anyhow::ensure!(
+                password.len() <= u8::MAX as usize,
+                "socks5 password too long"
+            );
+
+            let mut request = Vec::with_capacity(username.len() + password.len() + 3);
+            request.push(1);
+            request.push(username.len() as u8);
+            request.extend_from_slice(username.as_bytes());
+            request.push(password.len() as u8);
+            request.extend_from_slice(password.as_bytes());
+            stream.write_all(&request).await?;
+
+            let mut response = [0; 2];
+            stream.read_exact(&mut response).await?;
+            anyhow::ensure!(
+                response == [1, 0],
+                "socks5 username/password authentication failed"
+            );
+            Ok(())
+        }
+        0xff => anyhow::bail!("socks5 auth negotiation failed"),
+        method => anyhow::bail!("unsupported socks5 auth method {method}"),
+    }
 }
 
 async fn read_socks_bound_addr(stream: &mut TcpStream, atyp: u8) -> anyhow::Result<(String, u16)> {

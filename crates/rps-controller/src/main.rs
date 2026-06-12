@@ -4,6 +4,7 @@ mod proxy_http;
 mod proxy_socks5;
 mod proxy_tcp;
 mod proxy_udp;
+mod traffic;
 mod web;
 
 use anyhow::Context;
@@ -14,6 +15,7 @@ use rps_core::config::{ControllerConfig, TunnelMode, load_controller_config};
 use rps_mux::MuxHandle;
 use std::sync::Arc;
 use tracing::info;
+use traffic::TrafficAggregator;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -25,6 +27,7 @@ struct Args {
 pub(crate) struct AppState {
     config: Arc<ControllerConfig>,
     db: Database,
+    traffic: TrafficAggregator,
     clients: Arc<DashMap<String, MuxHandle>>,
 }
 
@@ -37,13 +40,16 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let config = Arc::new(load_controller_config(&args.config)?);
     let db = Database::open(&config.server.database_path, &config).await?;
+    let (traffic, traffic_rx) = TrafficAggregator::channel();
     let state = AppState {
         config: config.clone(),
-        db,
+        db: db.clone(),
+        traffic,
         clients: Arc::new(DashMap::new()),
     };
 
     info!(bridge_addr = %config.server.bridge_addr, "starting rps-controller");
+    tokio::spawn(traffic::run(db, traffic_rx));
     tokio::spawn(capture_usage_snapshots(state.clone()));
     tokio::spawn(bridge::run(state.clone()));
     tokio::spawn(web::run(state.clone()));

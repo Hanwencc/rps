@@ -94,5 +94,5 @@ where
     if !frame.payload.is_empty() {
         writer.write_all(&frame.payload).await?;
     }
-    writer.flush().await
+    Ok(())
 }

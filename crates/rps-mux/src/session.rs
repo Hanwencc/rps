@@ -10,19 +10,16 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{mpsc, oneshot},
-    time::{Duration, timeout},
+    sync::mpsc,
 };
 use tracing::{debug, warn};
 
 type StreamTx = mpsc::Sender<Bytes>;
-type PendingTx = oneshot::Sender<()>;
 
 #[derive(Clone)]
 pub struct MuxHandle {
     writer_tx: mpsc::Sender<Frame>,
     streams: Arc<DashMap<u32, StreamTx>>,
-    pending: Arc<DashMap<u32, PendingTx>>,
     next_id: Arc<AtomicU32>,
 }
 
@@ -56,12 +53,10 @@ impl Mux {
         let (writer_tx, mut writer_rx) = mpsc::channel::<Frame>(1024);
         let (incoming_tx, incoming_rx) = mpsc::channel::<MuxStream>(1024);
         let streams = Arc::new(DashMap::<u32, StreamTx>::new());
-        let pending = Arc::new(DashMap::<u32, PendingTx>::new());
 
         let handle = MuxHandle {
             writer_tx: writer_tx.clone(),
             streams: streams.clone(),
-            pending: pending.clone(),
             next_id: Arc::new(AtomicU32::new(1)),
         };
 
@@ -109,9 +104,7 @@ impl Mux {
                             .await;
                     }
                     FrameType::OpenAck => {
-                        if let Some((_, tx)) = pending.remove(&frame.stream_id) {
-                            let _ = tx.send(());
-                        }
+                        debug!(stream_id = frame.stream_id, "mux open acknowledged");
                     }
                     FrameType::Data => {
                         if let Some(tx) = streams.get(&frame.stream_id) {
@@ -120,9 +113,6 @@ impl Mux {
                     }
                     FrameType::Close | FrameType::Error => {
                         streams.remove(&frame.stream_id);
-                        if let Some((_, tx)) = pending.remove(&frame.stream_id) {
-                            let _ = tx.send(());
-                        }
                     }
                     FrameType::Ping => {
                         let _ = read_writer_tx
@@ -153,17 +143,15 @@ impl MuxHandle {
     pub async fn open_stream(&self, payload: Bytes) -> io::Result<MuxStream> {
         let id = self.next_stream_id();
         let (inbound_tx, inbound_rx) = mpsc::channel::<Bytes>(1024);
-        let (ack_tx, ack_rx) = oneshot::channel();
         self.streams.insert(id, inbound_tx);
-        self.pending.insert(id, ack_tx);
-        self.writer_tx
+        if let Err(err) = self
+            .writer_tx
             .send(Frame::new(FrameType::Open, id, payload))
             .await
-            .map_err(closed)?;
-        timeout(Duration::from_secs(10), ack_rx)
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "mux open stream timed out"))?
-            .map_err(closed)?;
+        {
+            self.streams.remove(&id);
+            return Err(closed(err));
+        }
         Ok(MuxStream {
             id,
             writer_tx: self.writer_tx.clone(),

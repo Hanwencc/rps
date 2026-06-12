@@ -30,6 +30,7 @@ async fn handle_conn(
     mut stream: TcpStream,
     remote_addr: String,
 ) -> anyhow::Result<()> {
+    stream.set_nodelay(true)?;
     let hello: Hello = read_json(&mut stream).await?;
     if hello.magic != MAGIC {
         write_json(&mut stream, &HelloAck::err("bad magic")).await?;

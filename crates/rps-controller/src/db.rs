@@ -4,9 +4,9 @@ use rps_core::config::{
 use rps_core::protocol::TargetProtocol;
 use sqlx::{
     Row, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
-use std::{path::Path, str::FromStr};
+use std::{path::Path, str::FromStr, time::Duration};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -79,7 +79,11 @@ impl Database {
         }
 
         let url = format!("sqlite://{}", path.to_string_lossy().replace('\\', "/"));
-        let options = SqliteConnectOptions::from_str(&url)?.create_if_missing(true);
+        let options = SqliteConnectOptions::from_str(&url)?
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)

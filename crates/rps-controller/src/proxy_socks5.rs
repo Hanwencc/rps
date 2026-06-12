@@ -159,6 +159,7 @@ async fn handle_conn(
     associations: Arc<DashMap<IpAddr, Arc<SocksUdpAssociation>>>,
     sessions: Arc<DashMap<SocksUdpSessionKey, SocksUdpSession>>,
 ) -> anyhow::Result<()> {
+    socket.set_nodelay(true)?;
     let mut hello = [0_u8; 2];
     socket.read_exact(&mut hello).await?;
     anyhow::ensure!(
@@ -462,7 +463,7 @@ async fn run_udp_relay(
                         warn!(%client_addr, error = %err, "socks5 udp response write failed");
                         break;
                     }
-                    response_recorder.add(data.len() as u64, 0).await;
+                    response_recorder.add(data.len() as u64, 0);
                     last_seen.store(now_secs(), Ordering::Relaxed);
                 }
                 sessions.remove(&response_key);
@@ -476,7 +477,7 @@ async fn run_udp_relay(
             warn!(%client_addr, %target, error = %err, "socks5 udp send to mux failed");
             sessions.remove(&key);
         } else {
-            recorder.add(0, payload_len).await;
+            recorder.add(0, payload_len);
         }
     }
 }
