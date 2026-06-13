@@ -30,6 +30,7 @@ export type TunnelResponse = {
   listen: string;
   target: string | null;
   enabled: boolean;
+  active_connections: number;
   expires_at: number | null;
   traffic_limit_bytes: number | null;
   rx_bytes: number;

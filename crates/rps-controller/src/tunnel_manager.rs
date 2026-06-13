@@ -2,7 +2,14 @@ use crate::{AppState, db::DbTunnel, proxy_tcp, proxy_udp};
 use anyhow::Context;
 use dashmap::DashMap;
 use rps_core::config::TunnelConfig;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     net::{TcpListener, UdpSocket},
     sync::{Mutex, watch},
@@ -19,12 +26,18 @@ struct TunnelRuntime {
     handle: JoinHandle<()>,
     listen: String,
     sessions: Arc<DashMap<String, watch::Sender<bool>>>,
+    active_connections: Arc<AtomicUsize>,
 }
 
 pub(crate) struct TunnelSessionGuard {
     id: String,
     sessions: Arc<DashMap<String, watch::Sender<bool>>>,
+    _connection_guard: TunnelConnectionGuard,
     shutdown: watch::Receiver<bool>,
+}
+
+pub(crate) struct TunnelConnectionGuard {
+    active_connections: Arc<AtomicUsize>,
 }
 
 impl TunnelManager {
@@ -61,6 +74,7 @@ impl TunnelManager {
         let id = tunnel.id.clone();
         let listen = tunnel.listen.clone();
         let sessions = Arc::new(DashMap::new());
+        let active_connections = Arc::new(AtomicUsize::new(0));
         let handle = match tunnel.mode {
             rps_core::config::TunnelMode::Tcp => {
                 let listener = TcpListener::bind(&tunnel.listen)
@@ -91,6 +105,7 @@ impl TunnelManager {
                 handle,
                 listen,
                 sessions,
+                active_connections,
             },
         );
         info!(tunnel_id = %id, "tunnel runtime started");
@@ -128,8 +143,25 @@ impl TunnelManager {
         Some(TunnelSessionGuard {
             id: session_id,
             sessions: runtime.sessions.clone(),
+            _connection_guard: TunnelConnectionGuard::new(runtime.active_connections.clone()),
             shutdown: shutdown_rx,
         })
+    }
+
+    pub(crate) async fn register_udp_session(&self, id: &str) -> Option<TunnelConnectionGuard> {
+        let running = self.running.lock().await;
+        let runtime = running.get(id)?;
+        Some(TunnelConnectionGuard::new(
+            runtime.active_connections.clone(),
+        ))
+    }
+
+    pub(crate) async fn active_count(&self, id: &str) -> usize {
+        let running = self.running.lock().await;
+        running
+            .get(id)
+            .map(|runtime| runtime.active_connections.load(Ordering::Relaxed))
+            .unwrap_or_default()
     }
 }
 
@@ -142,6 +174,19 @@ impl TunnelSessionGuard {
 impl Drop for TunnelSessionGuard {
     fn drop(&mut self) {
         self.sessions.remove(&self.id);
+    }
+}
+
+impl TunnelConnectionGuard {
+    fn new(active_connections: Arc<AtomicUsize>) -> Self {
+        active_connections.fetch_add(1, Ordering::Relaxed);
+        Self { active_connections }
+    }
+}
+
+impl Drop for TunnelConnectionGuard {
+    fn drop(&mut self) {
+        self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

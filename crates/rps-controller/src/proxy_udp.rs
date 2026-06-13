@@ -1,4 +1,4 @@
-use crate::{AppState, proxy_tcp};
+use crate::{AppState, proxy_tcp, tunnel_manager::TunnelConnectionGuard};
 use bytes::Bytes;
 use dashmap::DashMap;
 use rps_core::{
@@ -22,6 +22,7 @@ const UDP_IDLE_SECS: u64 = 120;
 struct UdpSession {
     writer: MuxStreamWriter,
     last_seen: Arc<AtomicU64>,
+    _connection_guard: Option<TunnelConnectionGuard>,
 }
 
 pub async fn serve(
@@ -125,11 +126,13 @@ async fn run_socket(
             });
             let (writer, mut reader) = stream.split();
             let last_seen = Arc::new(AtomicU64::new(now_secs()));
+            let connection_guard = state.tunnel_manager.register_udp_session(&tunnel.id).await;
             sessions.insert(
                 remote_addr,
                 UdpSession {
                     writer: writer.clone(),
                     last_seen: last_seen.clone(),
+                    _connection_guard: connection_guard,
                 },
             );
             let socket = socket.clone();

@@ -78,6 +78,7 @@ struct TunnelResponse {
     listen: String,
     target: Option<String>,
     enabled: bool,
+    active_connections: usize,
     expires_at: Option<i64>,
     traffic_limit_bytes: Option<u64>,
     rx_bytes: u64,
@@ -413,7 +414,11 @@ async fn tunnels(
 ) -> Result<Json<Vec<TunnelResponse>>, ApiError> {
     require_auth(&headers, &state)?;
     let tunnels = state.db.list_tunnels().await?;
-    Ok(Json(tunnels.into_iter().map(tunnel_response).collect()))
+    let mut response = Vec::with_capacity(tunnels.len());
+    for tunnel in tunnels {
+        response.push(tunnel_response(&state, tunnel).await);
+    }
+    Ok(Json(response))
 }
 
 async fn create_tunnel(
@@ -473,7 +478,10 @@ async fn create_tunnel(
         }
     }
 
-    Ok((StatusCode::CREATED, Json(tunnel_response(tunnel))))
+    Ok((
+        StatusCode::CREATED,
+        Json(tunnel_response(&state, tunnel).await),
+    ))
 }
 
 async fn delete_tunnel(
@@ -550,13 +558,11 @@ async fn console_data_response(state: &AppState) -> anyhow::Result<ConsoleDataRe
         client_responses.push(client_response(state, client).await?);
     }
 
-    let tunnels = state
-        .db
-        .list_tunnels()
-        .await?
-        .into_iter()
-        .map(tunnel_response)
-        .collect();
+    let tunnels = state.db.list_tunnels().await?;
+    let mut tunnel_responses = Vec::with_capacity(tunnels.len());
+    for tunnel in tunnels {
+        tunnel_responses.push(tunnel_response(state, tunnel).await);
+    }
 
     let proxy_accounts = state
         .db
@@ -569,7 +575,7 @@ async fn console_data_response(state: &AppState) -> anyhow::Result<ConsoleDataRe
     Ok(ConsoleDataResponse {
         status: status_response(state).await?,
         clients: client_responses,
-        tunnels,
+        tunnels: tunnel_responses,
         proxy: ProxyResponse {
             http_proxy: state.db.get_proxy("http").await?,
             socks5: state.db.get_proxy("socks5").await?,
@@ -639,7 +645,8 @@ async fn delete_proxy_account(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn tunnel_response(tunnel: crate::db::DbTunnel) -> TunnelResponse {
+async fn tunnel_response(state: &AppState, tunnel: crate::db::DbTunnel) -> TunnelResponse {
+    let active_connections = state.tunnel_manager.active_count(&tunnel.id).await;
     TunnelResponse {
         id: tunnel.id,
         client_id: tunnel.client_id,
@@ -647,6 +654,7 @@ fn tunnel_response(tunnel: crate::db::DbTunnel) -> TunnelResponse {
         listen: tunnel.listen,
         target: tunnel.target,
         enabled: tunnel.enabled,
+        active_connections,
         expires_at: tunnel.expires_at,
         traffic_limit_bytes: tunnel.traffic_limit_bytes,
         rx_bytes: tunnel.rx_bytes,

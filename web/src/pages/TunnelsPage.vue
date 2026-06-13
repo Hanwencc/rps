@@ -194,7 +194,7 @@ function formatReason(value: string | null) {
         <span class="text-sm text-slate-500">共 {{ tunnels.length }} 条</span>
       </div>
       <div class="overflow-x-auto">
-        <table class="w-full min-w-[820px] text-left text-sm">
+        <table class="w-full min-w-[920px] text-left text-sm">
           <thead class="bg-slate-50 text-xs text-slate-500">
             <tr>
               <th class="px-5 py-3">隧道 ID</th>
@@ -202,6 +202,7 @@ function formatReason(value: string | null) {
               <th class="px-5 py-3">目标地址</th>
               <th class="px-5 py-3">客户端</th>
               <th class="px-5 py-3">状态</th>
+              <th class="px-5 py-3">当前连接</th>
               <th class="px-5 py-3">流量</th>
               <th class="px-5 py-3">到期时间</th>
               <th class="px-5 py-3">停用原因</th>
@@ -215,6 +216,7 @@ function formatReason(value: string | null) {
               <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.target || "-" }}</td>
               <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.client_id }}</td>
               <td class="px-5 py-3">{{ tunnel.enabled ? "启用" : "停用" }}</td>
+              <td class="px-5 py-3 font-mono text-slate-900">{{ tunnel.active_connections }}</td>
               <td class="px-5 py-3 text-slate-600">
                 {{ formatBytes(tunnel.rx_bytes + tunnel.tx_bytes) }} /
                 {{ tunnel.traffic_limit_bytes ? formatBytes(tunnel.traffic_limit_bytes) : "不限" }}
@@ -234,7 +236,7 @@ function formatReason(value: string | null) {
               </td>
             </tr>
             <tr v-if="tunnels.length === 0">
-              <td class="px-5 py-8 text-center text-slate-500" colspan="9">暂无隧道</td>
+              <td class="px-5 py-8 text-center text-slate-500" colspan="10">暂无隧道</td>
             </tr>
           </tbody>
         </table>
