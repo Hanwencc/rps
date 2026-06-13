@@ -18,6 +18,7 @@ import Sidebar from "./components/Sidebar.vue";
 import LoginPage from "./pages/LoginPage.vue";
 import type {
   ClientResponse,
+  ConsoleData,
   CreateClientPayload,
   CreateProxyAccountPayload,
   CreateTunnelPayload,
@@ -64,7 +65,7 @@ const deletingClientId = ref<string | null>(null);
 const deletingTunnelId = ref<string | null>(null);
 const deletingProxyAccountId = ref<string | null>(null);
 const lastUpdated = ref<string | null>(null);
-let refreshTimer: number | undefined;
+let events: EventSource | null = null;
 
 const activeMenu = computed<MenuKey>(() => {
   const menu = route.meta.menu;
@@ -141,22 +142,28 @@ async function refresh() {
   error.value = null;
   try {
     const data = await loadConsoleData();
-    status.value = data.status;
-    clients.value = data.clients;
-    tunnels.value = data.tunnels;
-    proxy.value = data.proxy;
-    proxyAccounts.value = data.proxyAccounts;
-    lastUpdated.value = new Date().toLocaleTimeString();
+    applyConsoleData(data);
   } catch (err) {
     if (err instanceof HttpError && err.status === 401) {
       authenticated.value = false;
-      stopRefreshTimer();
+      stopRealtimeEvents();
       return;
     }
     error.value = err instanceof Error ? err.message : "加载控制端状态失败";
   } finally {
     loading.value = false;
   }
+}
+
+function applyConsoleData(data: ConsoleData) {
+  status.value = data.status;
+  clients.value = data.clients;
+  tunnels.value = data.tunnels;
+  proxy.value = data.proxy;
+  proxyAccounts.value = data.proxyAccounts;
+  lastUpdated.value = new Date().toLocaleTimeString();
+  loading.value = false;
+  error.value = null;
 }
 
 async function handleLogin(payload: LoginPayload) {
@@ -172,7 +179,7 @@ async function handleLogin(payload: LoginPayload) {
     authenticated.value = response.authenticated;
     requires2fa.value = false;
     loading.value = true;
-    startRefreshTimer();
+    startRealtimeEvents();
     await refresh();
   } catch (err) {
     loginError.value = err instanceof Error ? err.message : "登录失败";
@@ -291,16 +298,33 @@ async function handleRouteDelete(id: string) {
   }
 }
 
-function startRefreshTimer() {
-  stopRefreshTimer();
-  refreshTimer = window.setInterval(refresh, 5000);
+function startRealtimeEvents() {
+  stopRealtimeEvents();
+  events = new EventSource("/api/events", { withCredentials: true });
+  events.addEventListener("snapshot", (event) => {
+    try {
+      applyConsoleData(JSON.parse(event.data));
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : "实时数据解析失败";
+    }
+  });
+  events.addEventListener("auth_expired", () => {
+    authenticated.value = false;
+    stopRealtimeEvents();
+  });
+  events.addEventListener("stream_error", (event) => {
+    error.value = event.data || "实时数据推送失败";
+  });
+  events.addEventListener("error", () => {
+    if (events?.readyState === EventSource.CLOSED) {
+      error.value = "实时连接已断开";
+    }
+  });
 }
 
-function stopRefreshTimer() {
-  if (refreshTimer !== undefined) {
-    window.clearInterval(refreshTimer);
-    refreshTimer = undefined;
-  }
+function stopRealtimeEvents() {
+  events?.close();
+  events = null;
 }
 
 onMounted(async () => {
@@ -309,7 +333,7 @@ onMounted(async () => {
     authenticated.value = auth.authenticated;
     securityKeyAvailable.value = auth.security_key_available;
     if (auth.authenticated) {
-      startRefreshTimer();
+      startRealtimeEvents();
       await refresh();
     }
   } catch (err) {
@@ -320,7 +344,7 @@ onMounted(async () => {
   }
 });
 
-onUnmounted(stopRefreshTimer);
+onUnmounted(stopRealtimeEvents);
 </script>
 
 <template>

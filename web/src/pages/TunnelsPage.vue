@@ -24,6 +24,8 @@ const form = ref({
   listen: "",
   target: "",
   enabled: true,
+  expires_at: "",
+  traffic_limit_mb: "",
 });
 
 watch(
@@ -47,11 +49,15 @@ function submit() {
     listen: form.value.listen.trim(),
     target: form.value.target.trim(),
     enabled: form.value.enabled,
+    expires_at: datetimeLocalToUnix(form.value.expires_at),
+    traffic_limit_bytes: megabytesToBytes(form.value.traffic_limit_mb),
   });
   form.value.id = "";
   form.value.listen = "";
   form.value.target = "";
   form.value.enabled = true;
+  form.value.expires_at = "";
+  form.value.traffic_limit_mb = "";
 }
 
 function confirmDelete(tunnel: TunnelResponse) {
@@ -59,6 +65,47 @@ function confirmDelete(tunnel: TunnelResponse) {
   if (window.confirm(`确认删除隧道 ${tunnel.id}？${suffix}`)) {
     emit("delete", tunnel.id);
   }
+}
+
+function datetimeLocalToUnix(value: string) {
+  if (!value) {
+    return null;
+  }
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : null;
+}
+
+function megabytesToBytes(value: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.floor(parsed * 1024 * 1024);
+}
+
+function formatBytes(bytes: number | null) {
+  if (!bytes || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatTime(value: number | null) {
+  return value ? new Date(value * 1000).toLocaleString() : "永不过期";
+}
+
+function formatReason(value: string | null) {
+  if (value === "expired") return "已到期";
+  if (value === "traffic_exhausted") return "流量用完";
+  if (value === "manual") return "手动停用";
+  return value || "-";
 }
 </script>
 
@@ -68,7 +115,7 @@ function confirmDelete(tunnel: TunnelResponse) {
       <div class="border-b border-slate-200 px-5 py-4">
         <h2 class="font-semibold text-slate-900">新增 {{ title }}</h2>
       </div>
-      <form class="grid gap-4 p-5 lg:grid-cols-5" @submit.prevent="submit">
+      <form class="grid gap-4 p-5 lg:grid-cols-6" @submit.prevent="submit">
         <label class="block">
           <span class="text-sm text-slate-600">隧道 ID</span>
           <input
@@ -106,6 +153,24 @@ function confirmDelete(tunnel: TunnelResponse) {
             required
           />
         </label>
+        <label class="block">
+          <span class="text-sm text-slate-600">到期时间</span>
+          <input
+            v-model="form.expires_at"
+            class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+            type="datetime-local"
+          />
+        </label>
+        <label class="block">
+          <span class="text-sm text-slate-600">流量上限 MB</span>
+          <input
+            v-model="form.traffic_limit_mb"
+            class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+            min="0"
+            step="1"
+            type="number"
+          />
+        </label>
         <div class="flex items-end gap-4">
           <label class="flex items-center gap-2 pb-2 text-sm">
             <input v-model="form.enabled" type="checkbox" />
@@ -119,7 +184,7 @@ function confirmDelete(tunnel: TunnelResponse) {
             {{ creating ? "创建中" : "创建隧道" }}
           </button>
         </div>
-        <p v-if="error" class="text-sm text-red-600 lg:col-span-5">{{ error }}</p>
+        <p v-if="error" class="text-sm text-red-600 lg:col-span-6">{{ error }}</p>
       </form>
     </div>
 
@@ -137,6 +202,9 @@ function confirmDelete(tunnel: TunnelResponse) {
               <th class="px-5 py-3">目标地址</th>
               <th class="px-5 py-3">客户端</th>
               <th class="px-5 py-3">状态</th>
+              <th class="px-5 py-3">流量</th>
+              <th class="px-5 py-3">到期时间</th>
+              <th class="px-5 py-3">停用原因</th>
               <th class="px-5 py-3">操作</th>
             </tr>
           </thead>
@@ -147,6 +215,12 @@ function confirmDelete(tunnel: TunnelResponse) {
               <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.target || "-" }}</td>
               <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.client_id }}</td>
               <td class="px-5 py-3">{{ tunnel.enabled ? "启用" : "停用" }}</td>
+              <td class="px-5 py-3 text-slate-600">
+                {{ formatBytes(tunnel.rx_bytes + tunnel.tx_bytes) }} /
+                {{ tunnel.traffic_limit_bytes ? formatBytes(tunnel.traffic_limit_bytes) : "不限" }}
+              </td>
+              <td class="px-5 py-3 text-slate-600">{{ formatTime(tunnel.expires_at) }}</td>
+              <td class="px-5 py-3 text-slate-600">{{ formatReason(tunnel.disabled_reason) }}</td>
               <td class="px-5 py-3">
                 <button
                   class="inline-flex items-center gap-1 rounded border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
@@ -160,7 +234,7 @@ function confirmDelete(tunnel: TunnelResponse) {
               </td>
             </tr>
             <tr v-if="tunnels.length === 0">
-              <td class="px-5 py-8 text-center text-slate-500" colspan="6">暂无隧道</td>
+              <td class="px-5 py-8 text-center text-slate-500" colspan="9">暂无隧道</td>
             </tr>
           </tbody>
         </table>

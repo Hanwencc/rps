@@ -30,6 +30,11 @@ export type TunnelResponse = {
   listen: string;
   target: string | null;
   enabled: boolean;
+  expires_at: number | null;
+  traffic_limit_bytes: number | null;
+  rx_bytes: number;
+  tx_bytes: number;
+  disabled_reason: string | null;
 };
 
 export type CreateTunnelPayload = {
@@ -39,6 +44,8 @@ export type CreateTunnelPayload = {
   listen: string;
   target: string;
   enabled: boolean;
+  expires_at: number | null;
+  traffic_limit_bytes: number | null;
 };
 
 export type ProxyListenConfig = {
@@ -61,6 +68,11 @@ export type ProxyAccountResponse = {
   enabled: boolean;
   remark: string | null;
   active_connections: number;
+  expires_at: number | null;
+  traffic_limit_bytes: number | null;
+  rx_bytes: number;
+  tx_bytes: number;
+  disabled_reason: string | null;
 };
 
 export type MenuKey =
@@ -119,4 +131,6 @@ export type CreateProxyAccountPayload = {
   password: string | null;
   enabled: boolean;
   remark: string | null;
+  expires_at: number | null;
+  traffic_limit_bytes: number | null;
 };

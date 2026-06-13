@@ -1,5 +1,6 @@
 mod bridge;
 mod db;
+mod policy;
 mod proxy_http;
 mod proxy_manager;
 mod proxy_socks5;
@@ -13,6 +14,7 @@ use anyhow::Context;
 use clap::Parser;
 use dashmap::DashMap;
 use db::Database;
+use policy::PolicyEnforcer;
 use proxy_manager::ProxyManager;
 use rps_core::config::{ControllerConfig, load_controller_config};
 use rps_mux::MuxHandle;
@@ -36,6 +38,7 @@ pub(crate) struct AppState {
     web_sessions: Arc<DashMap<String, WebSession>>,
     tunnel_manager: Arc<TunnelManager>,
     proxy_manager: ProxyManager,
+    policy: PolicyEnforcer,
 }
 
 #[derive(Clone)]
@@ -54,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(load_controller_config(&args.config)?);
     let db = Database::open(&config.server.database_path, &config).await?;
     let (traffic, traffic_rx) = TrafficAggregator::channel();
+    let (policy, policy_rx) = PolicyEnforcer::channel();
     let state = AppState {
         config: config.clone(),
         db: db.clone(),
@@ -62,10 +66,13 @@ async fn main() -> anyhow::Result<()> {
         web_sessions: Arc::new(DashMap::new()),
         tunnel_manager: Arc::new(TunnelManager::new()),
         proxy_manager: ProxyManager::new(),
+        policy,
     };
 
     info!(bridge_addr = %config.server.bridge_addr, "starting rps-controller");
+    state.policy.load_from_db(&state).await?;
     tokio::spawn(traffic::run(db, traffic_rx));
+    tokio::spawn(policy::run(state.clone(), policy_rx));
     tokio::spawn(capture_usage_snapshots(state.clone()));
     tokio::spawn(bridge::run(state.clone()));
     tokio::spawn(web::run(state.clone()));

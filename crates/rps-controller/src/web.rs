@@ -3,13 +3,14 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{delete, get, post},
 };
 use hmac::{Hmac, Mac};
 use rps_core::config::{ProxyListenConfig, TunnelMode};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{convert::Infallible, net::SocketAddr, path::PathBuf, time::Duration};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info};
 use uuid::Uuid;
@@ -17,6 +18,7 @@ use uuid::Uuid;
 const SESSION_COOKIE: &str = "rps_session";
 const TOTP_STEP_SECS: i64 = 30;
 const TOTP_DIGITS: u32 = 6;
+const EVENTS_INTERVAL: Duration = Duration::from_secs(1);
 type HmacSha1 = Hmac<Sha1>;
 
 #[derive(Debug, Serialize)]
@@ -64,6 +66,8 @@ struct CreateTunnelRequest {
     listen: String,
     target: Option<String>,
     enabled: Option<bool>,
+    expires_at: Option<i64>,
+    traffic_limit_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,12 +78,27 @@ struct TunnelResponse {
     listen: String,
     target: Option<String>,
     enabled: bool,
+    expires_at: Option<i64>,
+    traffic_limit_bytes: Option<u64>,
+    rx_bytes: u64,
+    tx_bytes: u64,
+    disabled_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct ProxyResponse {
     http_proxy: Option<ProxyListenConfig>,
     socks5: Option<ProxyListenConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConsoleDataResponse {
+    status: StatusResponse,
+    clients: Vec<ClientResponse>,
+    tunnels: Vec<TunnelResponse>,
+    proxy: ProxyResponse,
+    #[serde(rename = "proxyAccounts")]
+    proxy_accounts: Vec<ProxyAccountResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +111,11 @@ struct ProxyAccountResponse {
     enabled: bool,
     remark: Option<String>,
     active_connections: usize,
+    expires_at: Option<i64>,
+    traffic_limit_bytes: Option<u64>,
+    rx_bytes: u64,
+    tx_bytes: u64,
+    disabled_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +131,8 @@ struct CreateProxyAccountRequest {
     password: Option<String>,
     enabled: Option<bool>,
     remark: Option<String>,
+    expires_at: Option<i64>,
+    traffic_limit_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +173,7 @@ async fn run_inner(state: AppState) -> anyhow::Result<()> {
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
+        .route("/api/events", get(events))
         .route("/api/status", get(status))
         .route("/api/clients", get(clients).post(create_client))
         .route("/api/clients/{id}", delete(delete_client))
@@ -279,27 +306,32 @@ async fn status(
     State(state): State<AppState>,
 ) -> Result<Json<StatusResponse>, ApiError> {
     require_auth(&headers, &state)?;
-    let configured_clients = state.db.count_clients().await?;
-    let enabled_tunnels = state.db.count_enabled_tunnels().await?;
-    Ok(Json(StatusResponse {
-        bridge_addr: state.config.server.bridge_addr.clone(),
-        web_addr: state.config.server.web_addr.clone(),
-        online_clients: state.clients.len(),
-        configured_clients,
-        enabled_tunnels,
-        http_proxy_enabled: state
-            .config
-            .server
-            .http_proxy
-            .as_ref()
-            .is_some_and(|p| p.enabled),
-        socks5_enabled: state
-            .config
-            .server
-            .socks5
-            .as_ref()
-            .is_some_and(|p| p.enabled),
-    }))
+    Ok(Json(status_response(&state).await?))
+}
+
+async fn events(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    require_auth(&headers, &state)?;
+    let stream = async_stream::stream! {
+        let mut interval = tokio::time::interval(EVENTS_INTERVAL);
+        loop {
+            interval.tick().await;
+            if require_auth(&headers, &state).is_err() {
+                yield Ok(Event::default().event("auth_expired").data("unauthorized"));
+                break;
+            }
+            match console_data_response(&state).await {
+                Ok(data) => match serde_json::to_string(&data) {
+                    Ok(json) => yield Ok(Event::default().event("snapshot").data(json)),
+                    Err(err) => yield Ok(Event::default().event("stream_error").data(err.to_string())),
+                },
+                Err(err) => yield Ok(Event::default().event("stream_error").data(err.to_string())),
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn clients(
@@ -415,8 +447,16 @@ async fn create_tunnel(
             listen: request.listen,
             target: Some(target),
             enabled: request.enabled.unwrap_or(true),
+            expires_at: request.expires_at,
+            traffic_limit_bytes: request.traffic_limit_bytes,
         })
         .await?;
+    state.policy.register(
+        crate::policy::tunnel_key(tunnel.id.clone()),
+        tunnel.expires_at,
+        tunnel.traffic_limit_bytes,
+        tunnel.rx_bytes.saturating_add(tunnel.tx_bytes),
+    );
 
     if tunnel.enabled {
         let tunnel_config = tunnel_config_from_db(&tunnel);
@@ -426,6 +466,9 @@ async fn create_tunnel(
             .await
         {
             let _ = state.db.delete_tunnel(&tunnel.id).await;
+            state
+                .policy
+                .remove(&crate::policy::tunnel_key(tunnel.id.clone()));
             return Err(ApiError::from(err));
         }
     }
@@ -446,6 +489,7 @@ async fn delete_tunnel(
         });
     }
     state.tunnel_manager.stop(&id).await?;
+    state.policy.remove(&crate::policy::tunnel_key(id));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -473,6 +517,65 @@ async fn proxy_accounts(
             .map(|account| proxy_account_response(&state, account))
             .collect(),
     ))
+}
+
+async fn status_response(state: &AppState) -> anyhow::Result<StatusResponse> {
+    let configured_clients = state.db.count_clients().await?;
+    let enabled_tunnels = state.db.count_enabled_tunnels().await?;
+    Ok(StatusResponse {
+        bridge_addr: state.config.server.bridge_addr.clone(),
+        web_addr: state.config.server.web_addr.clone(),
+        online_clients: state.clients.len(),
+        configured_clients,
+        enabled_tunnels,
+        http_proxy_enabled: state
+            .config
+            .server
+            .http_proxy
+            .as_ref()
+            .is_some_and(|p| p.enabled),
+        socks5_enabled: state
+            .config
+            .server
+            .socks5
+            .as_ref()
+            .is_some_and(|p| p.enabled),
+    })
+}
+
+async fn console_data_response(state: &AppState) -> anyhow::Result<ConsoleDataResponse> {
+    let clients = state.db.list_clients().await?;
+    let mut client_responses = Vec::with_capacity(clients.len());
+    for client in clients {
+        client_responses.push(client_response(state, client).await?);
+    }
+
+    let tunnels = state
+        .db
+        .list_tunnels()
+        .await?
+        .into_iter()
+        .map(tunnel_response)
+        .collect();
+
+    let proxy_accounts = state
+        .db
+        .list_proxy_accounts(None)
+        .await?
+        .into_iter()
+        .map(|account| proxy_account_response(state, account))
+        .collect();
+
+    Ok(ConsoleDataResponse {
+        status: status_response(state).await?,
+        clients: client_responses,
+        tunnels,
+        proxy: ProxyResponse {
+            http_proxy: state.db.get_proxy("http").await?,
+            socks5: state.db.get_proxy("socks5").await?,
+        },
+        proxy_accounts,
+    })
 }
 
 async fn create_proxy_account(
@@ -503,8 +606,16 @@ async fn create_proxy_account(
                 .unwrap_or_else(random_proxy_secret),
             enabled: request.enabled.unwrap_or(true),
             remark: request.remark.filter(|value| !value.trim().is_empty()),
+            expires_at: request.expires_at,
+            traffic_limit_bytes: request.traffic_limit_bytes,
         })
         .await?;
+    state.policy.register(
+        crate::policy::proxy_account_key(account.id.clone()),
+        account.expires_at,
+        account.traffic_limit_bytes,
+        account.rx_bytes.saturating_add(account.tx_bytes),
+    );
     Ok((
         StatusCode::CREATED,
         Json(proxy_account_response(&state, account)),
@@ -524,6 +635,7 @@ async fn delete_proxy_account(
         });
     }
     state.proxy_manager.revoke_account(&id);
+    state.policy.remove(&crate::policy::proxy_account_key(id));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -535,6 +647,11 @@ fn tunnel_response(tunnel: crate::db::DbTunnel) -> TunnelResponse {
         listen: tunnel.listen,
         target: tunnel.target,
         enabled: tunnel.enabled,
+        expires_at: tunnel.expires_at,
+        traffic_limit_bytes: tunnel.traffic_limit_bytes,
+        rx_bytes: tunnel.rx_bytes,
+        tx_bytes: tunnel.tx_bytes,
+        disabled_reason: tunnel.disabled_reason,
     }
 }
 
@@ -571,6 +688,11 @@ fn proxy_account_response(
         enabled: account.enabled,
         remark: account.remark,
         active_connections,
+        expires_at: account.expires_at,
+        traffic_limit_bytes: account.traffic_limit_bytes,
+        rx_bytes: account.rx_bytes,
+        tx_bytes: account.tx_bytes,
+        disabled_reason: account.disabled_reason,
     }
 }
 

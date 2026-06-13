@@ -30,6 +30,8 @@ const form = ref({
   password: "",
   enabled: true,
   remark: "",
+  expires_at: "",
+  traffic_limit_mb: "",
 });
 
 const title = computed(() => (props.kind === "http" ? "HTTP 代理" : "SOCKS 代理"));
@@ -57,17 +59,62 @@ function submit() {
     password: form.value.password.trim() || null,
     enabled: form.value.enabled,
     remark: form.value.remark.trim() || null,
+    expires_at: datetimeLocalToUnix(form.value.expires_at),
+    traffic_limit_bytes: megabytesToBytes(form.value.traffic_limit_mb),
   });
   form.value.username = "";
   form.value.password = "";
   form.value.remark = "";
   form.value.enabled = true;
+  form.value.expires_at = "";
+  form.value.traffic_limit_mb = "";
 }
 
 function confirmDelete(account: ProxyAccountResponse) {
   if (window.confirm(`确认删除代理账号 ${account.username}？删除后新的代理认证会立即失效。`)) {
     emit("delete", account.id);
   }
+}
+
+function datetimeLocalToUnix(value: string) {
+  if (!value) {
+    return null;
+  }
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : null;
+}
+
+function megabytesToBytes(value: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.floor(parsed * 1024 * 1024);
+}
+
+function formatBytes(bytes: number | null) {
+  if (!bytes || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatTime(value: number | null) {
+  return value ? new Date(value * 1000).toLocaleString() : "永不过期";
+}
+
+function formatReason(value: string | null) {
+  if (value === "expired") return "已到期";
+  if (value === "traffic_exhausted") return "流量用完";
+  if (value === "manual") return "手动停用";
+  return value || "-";
 }
 </script>
 
@@ -121,7 +168,7 @@ function confirmDelete(account: ProxyAccountResponse) {
       <div class="border-b border-slate-200 px-5 py-4">
         <h2 class="font-semibold text-slate-900">新增{{ title }}账号</h2>
       </div>
-      <form class="grid gap-4 p-5 lg:grid-cols-5" @submit.prevent="submit">
+      <form class="grid gap-4 p-5 lg:grid-cols-6" @submit.prevent="submit">
         <label class="block">
           <span class="text-sm text-slate-600">绑定客户端</span>
           <select
@@ -153,6 +200,24 @@ function confirmDelete(account: ProxyAccountResponse) {
           <span class="text-sm text-slate-600">备注</span>
           <input v-model="form.remark" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
         </label>
+        <label class="block">
+          <span class="text-sm text-slate-600">到期时间</span>
+          <input
+            v-model="form.expires_at"
+            class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+            type="datetime-local"
+          />
+        </label>
+        <label class="block">
+          <span class="text-sm text-slate-600">流量上限 MB</span>
+          <input
+            v-model="form.traffic_limit_mb"
+            class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+            min="0"
+            step="1"
+            type="number"
+          />
+        </label>
         <div class="flex items-end gap-4">
           <label class="flex items-center gap-2 pb-2 text-sm"><input v-model="form.enabled" type="checkbox" />启用</label>
           <button
@@ -163,7 +228,7 @@ function confirmDelete(account: ProxyAccountResponse) {
             {{ creating ? "创建中" : "新增账号" }}
           </button>
         </div>
-        <p v-if="error" class="text-sm text-red-600 lg:col-span-5">{{ error }}</p>
+        <p v-if="error" class="text-sm text-red-600 lg:col-span-6">{{ error }}</p>
       </form>
     </div>
 
@@ -182,13 +247,16 @@ function confirmDelete(account: ProxyAccountResponse) {
               <th class="px-5 py-3">密码</th>
               <th class="px-5 py-3">状态</th>
               <th class="px-5 py-3">当前连接</th>
+              <th class="px-5 py-3">流量</th>
+              <th class="px-5 py-3">到期时间</th>
+              <th class="px-5 py-3">停用原因</th>
               <th class="px-5 py-3">备注</th>
               <th class="px-5 py-3">操作</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
             <tr v-if="filteredAccounts.length === 0">
-              <td class="px-5 py-6 text-center text-slate-500" colspan="8">
+              <td class="px-5 py-6 text-center text-slate-500" colspan="11">
                 暂无账号。未创建账号时，该代理端口保持无认证兼容模式。
               </td>
             </tr>
@@ -199,6 +267,12 @@ function confirmDelete(account: ProxyAccountResponse) {
               <td class="px-5 py-3 font-mono text-slate-600">{{ account.password }}</td>
               <td class="px-5 py-3"><StatusBadge :enabled="account.enabled" /></td>
               <td class="px-5 py-3 font-mono text-slate-900">{{ account.active_connections }}</td>
+              <td class="px-5 py-3 text-slate-600">
+                {{ formatBytes(account.rx_bytes + account.tx_bytes) }} /
+                {{ account.traffic_limit_bytes ? formatBytes(account.traffic_limit_bytes) : "不限" }}
+              </td>
+              <td class="px-5 py-3 text-slate-600">{{ formatTime(account.expires_at) }}</td>
+              <td class="px-5 py-3 text-slate-600">{{ formatReason(account.disabled_reason) }}</td>
               <td class="px-5 py-3 text-slate-600">{{ account.remark || "-" }}</td>
               <td class="px-5 py-3">
                 <button

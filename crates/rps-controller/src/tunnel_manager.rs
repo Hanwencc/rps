@@ -1,7 +1,8 @@
 use crate::{AppState, db::DbTunnel, proxy_tcp, proxy_udp};
 use anyhow::Context;
+use dashmap::DashMap;
 use rps_core::config::TunnelConfig;
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     net::{TcpListener, UdpSocket},
     sync::{Mutex, watch},
@@ -17,6 +18,13 @@ struct TunnelRuntime {
     shutdown: watch::Sender<bool>,
     handle: JoinHandle<()>,
     listen: String,
+    sessions: Arc<DashMap<String, watch::Sender<bool>>>,
+}
+
+pub(crate) struct TunnelSessionGuard {
+    id: String,
+    sessions: Arc<DashMap<String, watch::Sender<bool>>>,
+    shutdown: watch::Receiver<bool>,
 }
 
 impl TunnelManager {
@@ -42,10 +50,17 @@ impl TunnelManager {
         if running.contains_key(&tunnel.id) {
             anyhow::bail!("tunnel {} is already running", tunnel.id);
         }
+        if !state
+            .policy
+            .allowed(&crate::policy::tunnel_key(tunnel.id.clone()))
+        {
+            anyhow::bail!("tunnel {} is disabled by policy", tunnel.id);
+        }
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let id = tunnel.id.clone();
         let listen = tunnel.listen.clone();
+        let sessions = Arc::new(DashMap::new());
         let handle = match tunnel.mode {
             rps_core::config::TunnelMode::Tcp => {
                 let listener = TcpListener::bind(&tunnel.listen)
@@ -75,6 +90,7 @@ impl TunnelManager {
                 shutdown: shutdown_tx,
                 handle,
                 listen,
+                sessions,
             },
         );
         info!(tunnel_id = %id, "tunnel runtime started");
@@ -87,6 +103,9 @@ impl TunnelManager {
         };
 
         let _ = runtime.shutdown.send(true);
+        for entry in runtime.sessions.iter() {
+            let _ = entry.value().send(true);
+        }
         let mut handle = runtime.handle;
         if tokio::time::timeout(Duration::from_secs(5), &mut handle)
             .await
@@ -98,6 +117,31 @@ impl TunnelManager {
         }
         info!(tunnel_id = %id, listen = %runtime.listen, "tunnel runtime stopped");
         Ok(true)
+    }
+
+    pub(crate) async fn register_session(&self, id: &str) -> Option<TunnelSessionGuard> {
+        let running = self.running.lock().await;
+        let runtime = running.get(id)?;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        runtime.sessions.insert(session_id.clone(), shutdown_tx);
+        Some(TunnelSessionGuard {
+            id: session_id,
+            sessions: runtime.sessions.clone(),
+            shutdown: shutdown_rx,
+        })
+    }
+}
+
+impl TunnelSessionGuard {
+    pub(crate) fn shutdown_rx(&self) -> watch::Receiver<bool> {
+        self.shutdown.clone()
+    }
+}
+
+impl Drop for TunnelSessionGuard {
+    fn drop(&mut self) {
+        self.sessions.remove(&self.id);
     }
 }
 

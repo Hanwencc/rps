@@ -230,6 +230,13 @@ async fn authenticate(
             socket.write_all(&[1, 1]).await?;
             anyhow::bail!("socks5 username/password authentication failed");
         };
+        if !state
+            .policy
+            .allowed(&crate::policy::proxy_account_key(account.id.clone()))
+        {
+            socket.write_all(&[1, 1]).await?;
+            anyhow::bail!("socks5 account disabled by policy");
+        }
         socket.write_all(&[1, 0]).await?;
         return Ok(SocksAuthContext {
             client_id: account.client_id,

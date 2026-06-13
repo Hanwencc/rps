@@ -127,6 +127,12 @@ async fn authenticated_route(
     else {
         return Ok(None);
     };
+    if !state
+        .policy
+        .allowed(&crate::policy::proxy_account_key(account.id.clone()))
+    {
+        return Ok(None);
+    }
     Ok(Some(HttpProxyAuth {
         route: proxy_tcp::StreamRoute {
             tunnel_id: format!("http-proxy:{}", account.id),

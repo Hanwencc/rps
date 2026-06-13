@@ -47,6 +47,9 @@ impl TrafficRecorder {
 
     pub fn add(&self, rx_bytes: u64, tx_bytes: u64) {
         self.state
+            .policy
+            .record_route_usage(&self.tunnel_id, rx_bytes, tx_bytes);
+        self.state
             .traffic
             .record(&self.client_id, &self.tunnel_id, rx_bytes, tx_bytes);
     }
@@ -102,7 +105,21 @@ pub async fn handle_tcp(
     let route = StreamRoute::from(&tunnel);
     let recorder = TrafficRecorder::new(&state, &route);
     let stream = open_stream(state, &route, TargetProtocol::Tcp, target, remote_addr).await?;
-    pipe_tcp_mux(socket, stream, initial_data, Some(recorder)).await
+    if let Some(session_guard) = recorder
+        .state
+        .tunnel_manager
+        .register_session(&route.tunnel_id)
+        .await
+    {
+        let shutdown = session_guard.shutdown_rx();
+        let result =
+            pipe_tcp_mux_with_shutdown(socket, stream, initial_data, Some(recorder), shutdown)
+                .await;
+        drop(session_guard);
+        result
+    } else {
+        pipe_tcp_mux(socket, stream, initial_data, Some(recorder)).await
+    }
 }
 
 pub async fn open_stream(
