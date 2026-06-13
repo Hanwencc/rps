@@ -12,6 +12,9 @@ import {
   deleteTunnel,
   loadConsoleData,
   login,
+  updateClient,
+  updateProxyAccount,
+  updateTunnel,
 } from "./api";
 import PageHeader from "./components/PageHeader.vue";
 import Sidebar from "./components/Sidebar.vue";
@@ -28,9 +31,13 @@ import type {
   ProxyResponse,
   StatusResponse,
   TunnelResponse,
+  UpdateClientPayload,
+  UpdateProxyAccountPayload,
+  UpdateTunnelPayload,
 } from "./types";
 
 type RouteCreatePayload = CreateClientPayload | CreateTunnelPayload | CreateProxyAccountPayload;
+type RouteUpdatePayload = UpdateClientPayload | UpdateTunnelPayload | UpdateProxyAccountPayload;
 
 const menuLabels: Record<MenuKey, string> = {
   dashboard: "仪表盘",
@@ -64,6 +71,9 @@ const creatingProxy = ref(false);
 const deletingClientId = ref<string | null>(null);
 const deletingTunnelId = ref<string | null>(null);
 const deletingProxyAccountId = ref<string | null>(null);
+const savingClientId = ref<string | null>(null);
+const savingTunnelId = ref<string | null>(null);
+const savingProxyAccountId = ref<string | null>(null);
 const lastUpdated = ref<string | null>(null);
 let events: EventSource | null = null;
 
@@ -85,6 +95,7 @@ const pageProps = computed<Record<string, unknown>>(() => {
         creating: creatingClient.value,
         deletingId: deletingClientId.value,
         error: createClientError.value,
+        savingId: savingClientId.value,
       };
     case "tcp":
       return {
@@ -93,6 +104,7 @@ const pageProps = computed<Record<string, unknown>>(() => {
         deletingId: deletingTunnelId.value,
         error: createTunnelError.value,
         mode: "tcp",
+        savingId: savingTunnelId.value,
         title: "TCP 隧道",
         tunnels: tcpTunnels.value,
       };
@@ -103,6 +115,7 @@ const pageProps = computed<Record<string, unknown>>(() => {
         deletingId: deletingTunnelId.value,
         error: createTunnelError.value,
         mode: "udp",
+        savingId: savingTunnelId.value,
         title: "UDP 隧道",
         tunnels: udpTunnels.value,
       };
@@ -115,6 +128,7 @@ const pageProps = computed<Record<string, unknown>>(() => {
         error: createProxyError.value,
         kind: "http",
         listener: proxy.value?.http_proxy ?? null,
+        savingId: savingProxyAccountId.value,
       };
     case "socks":
       return {
@@ -125,6 +139,7 @@ const pageProps = computed<Record<string, unknown>>(() => {
         error: createProxyError.value,
         kind: "socks5",
         listener: proxy.value?.socks5 ?? null,
+        savingId: savingProxyAccountId.value,
       };
     default:
       return {
@@ -266,6 +281,48 @@ async function handleDeleteProxyAccount(id: string) {
   }
 }
 
+async function handleUpdateClient(id: string, payload: UpdateClientPayload) {
+  createClientError.value = null;
+  savingClientId.value = id;
+  try {
+    const updated = await updateClient(id, payload);
+    clients.value = clients.value.map((client) => (client.id === id ? updated : client));
+    await refresh();
+  } catch (err) {
+    createClientError.value = err instanceof Error ? err.message : "保存客户端失败";
+  } finally {
+    savingClientId.value = null;
+  }
+}
+
+async function handleUpdateTunnel(id: string, payload: UpdateTunnelPayload) {
+  createTunnelError.value = null;
+  savingTunnelId.value = id;
+  try {
+    const updated = await updateTunnel(id, payload);
+    tunnels.value = tunnels.value.map((tunnel) => (tunnel.id === id ? updated : tunnel));
+    await refresh();
+  } catch (err) {
+    createTunnelError.value = err instanceof Error ? err.message : "保存隧道失败";
+  } finally {
+    savingTunnelId.value = null;
+  }
+}
+
+async function handleUpdateProxyAccount(id: string, payload: UpdateProxyAccountPayload) {
+  createProxyError.value = null;
+  savingProxyAccountId.value = id;
+  try {
+    const updated = await updateProxyAccount(id, payload);
+    proxyAccounts.value = proxyAccounts.value.map((account) => (account.id === id ? updated : account));
+    await refresh();
+  } catch (err) {
+    createProxyError.value = err instanceof Error ? err.message : "保存代理账号失败";
+  } finally {
+    savingProxyAccountId.value = null;
+  }
+}
+
 async function handleRouteCreate(payload: RouteCreatePayload) {
   switch (activeMenu.value) {
     case "clients":
@@ -278,6 +335,22 @@ async function handleRouteCreate(payload: RouteCreatePayload) {
     case "http":
     case "socks":
       await handleCreateProxyAccount(payload as CreateProxyAccountPayload);
+      break;
+  }
+}
+
+async function handleRouteUpdate(id: string, payload: RouteUpdatePayload) {
+  switch (activeMenu.value) {
+    case "clients":
+      await handleUpdateClient(id, payload as UpdateClientPayload);
+      break;
+    case "tcp":
+    case "udp":
+      await handleUpdateTunnel(id, payload as UpdateTunnelPayload);
+      break;
+    case "http":
+    case "socks":
+      await handleUpdateProxyAccount(id, payload as UpdateProxyAccountPayload);
       break;
   }
 }
@@ -383,6 +456,7 @@ onUnmounted(stopRealtimeEvents);
                 v-bind="pageProps"
                 @create="handleRouteCreate"
                 @delete="handleRouteDelete"
+                @update="handleRouteUpdate"
               />
             </RouterView>
           </template>

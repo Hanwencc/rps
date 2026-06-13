@@ -11,6 +11,9 @@ import type {
   ProxyResponse,
   StatusResponse,
   TunnelResponse,
+  UpdateClientPayload,
+  UpdateProxyAccountPayload,
+  UpdateTunnelPayload,
 } from "./types";
 
 export class HttpError extends Error {
@@ -91,6 +94,13 @@ export async function deleteClient(id: string): Promise<void> {
   });
 }
 
+export async function updateClient(id: string, payload: UpdateClientPayload): Promise<ClientResponse> {
+  return fetchJson<ClientResponse>(`/api/clients/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function createTunnel(payload: CreateTunnelPayload): Promise<TunnelResponse> {
   return fetchJson<TunnelResponse>("/api/tunnels", {
     method: "POST",
@@ -101,6 +111,13 @@ export async function createTunnel(payload: CreateTunnelPayload): Promise<Tunnel
 export async function deleteTunnel(id: string): Promise<void> {
   await fetchEmpty(`/api/tunnels/${encodeURIComponent(id)}`, {
     method: "DELETE",
+  });
+}
+
+export async function updateTunnel(id: string, payload: UpdateTunnelPayload): Promise<TunnelResponse> {
+  return fetchJson<TunnelResponse>(`/api/tunnels/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
   });
 }
 
@@ -116,5 +133,15 @@ export async function createProxyAccount(
 export async function deleteProxyAccount(id: string): Promise<void> {
   await fetchEmpty(`/api/proxy-accounts/${encodeURIComponent(id)}`, {
     method: "DELETE",
+  });
+}
+
+export async function updateProxyAccount(
+  id: string,
+  payload: UpdateProxyAccountPayload,
+): Promise<ProxyAccountResponse> {
+  return fetchJson<ProxyAccountResponse>(`/api/proxy-accounts/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
   });
 }

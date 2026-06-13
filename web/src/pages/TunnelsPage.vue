@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { Trash2 } from "lucide-vue-next";
-import type { ClientResponse, CreateTunnelPayload, TunnelResponse } from "../types";
+import { Pencil, Save, Trash2, X } from "lucide-vue-next";
+import type { ClientResponse, CreateTunnelPayload, TunnelResponse, UpdateTunnelPayload } from "../types";
 
 const props = defineProps<{
   title: string;
@@ -10,16 +10,27 @@ const props = defineProps<{
   clients: ClientResponse[];
   creating: boolean;
   deletingId: string | null;
+  savingId: string | null;
   error: string | null;
 }>();
 
 const emit = defineEmits<{
   create: [payload: CreateTunnelPayload];
+  update: [id: string, payload: UpdateTunnelPayload];
   delete: [id: string];
 }>();
 
 const form = ref({
   id: "",
+  client_id: "",
+  listen: "",
+  target: "",
+  enabled: true,
+  expires_at: "",
+  traffic_limit_mb: "",
+});
+const editingId = ref<string | null>(null);
+const editForm = ref({
   client_id: "",
   listen: "",
   target: "",
@@ -67,6 +78,35 @@ function confirmDelete(tunnel: TunnelResponse) {
   }
 }
 
+function beginEdit(tunnel: TunnelResponse) {
+  editingId.value = tunnel.id;
+  editForm.value = {
+    client_id: tunnel.client_id,
+    listen: tunnel.listen,
+    target: tunnel.target || "",
+    enabled: tunnel.enabled,
+    expires_at: unixToDatetimeLocal(tunnel.expires_at),
+    traffic_limit_mb: bytesToMegabytes(tunnel.traffic_limit_bytes),
+  };
+}
+
+function cancelEdit() {
+  editingId.value = null;
+}
+
+function saveEdit(tunnel: TunnelResponse) {
+  emit("update", tunnel.id, {
+    client_id: editForm.value.client_id,
+    mode: props.mode,
+    listen: editForm.value.listen.trim(),
+    target: editForm.value.target.trim(),
+    enabled: editForm.value.enabled,
+    expires_at: datetimeLocalToUnix(editForm.value.expires_at),
+    traffic_limit_bytes: megabytesToBytes(editForm.value.traffic_limit_mb),
+  });
+  editingId.value = null;
+}
+
 function datetimeLocalToUnix(value: string) {
   if (!value) {
     return null;
@@ -75,12 +115,25 @@ function datetimeLocalToUnix(value: string) {
   return Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : null;
 }
 
+function unixToDatetimeLocal(value: number | null) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value * 1000);
+  const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
 function megabytesToBytes(value: string) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return null;
   }
   return Math.floor(parsed * 1024 * 1024);
+}
+
+function bytesToMegabytes(value: number | null) {
+  return value ? String(Math.ceil(value / 1024 / 1024)) : "";
 }
 
 function formatBytes(bytes: number | null) {
@@ -210,31 +263,117 @@ function formatReason(value: string | null) {
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
-            <tr v-for="tunnel in tunnels" :key="tunnel.id">
-              <td class="px-5 py-3 font-mono text-slate-900">{{ tunnel.id }}</td>
-              <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.listen }}</td>
-              <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.target || "-" }}</td>
-              <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.client_id }}</td>
-              <td class="px-5 py-3">{{ tunnel.enabled ? "启用" : "停用" }}</td>
-              <td class="px-5 py-3 font-mono text-slate-900">{{ tunnel.active_connections }}</td>
-              <td class="px-5 py-3 text-slate-600">
-                {{ formatBytes(tunnel.rx_bytes + tunnel.tx_bytes) }} /
-                {{ tunnel.traffic_limit_bytes ? formatBytes(tunnel.traffic_limit_bytes) : "不限" }}
-              </td>
-              <td class="px-5 py-3 text-slate-600">{{ formatTime(tunnel.expires_at) }}</td>
-              <td class="px-5 py-3 text-slate-600">{{ formatReason(tunnel.disabled_reason) }}</td>
-              <td class="px-5 py-3">
-                <button
-                  class="inline-flex items-center gap-1 rounded border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
-                  :disabled="deletingId === tunnel.id"
-                  type="button"
-                  @click="confirmDelete(tunnel)"
-                >
-                  <Trash2 :size="14" />
-                  {{ deletingId === tunnel.id ? "删除中" : "删除" }}
-                </button>
-              </td>
-            </tr>
+            <template v-for="tunnel in tunnels" :key="tunnel.id">
+              <tr>
+                <td class="px-5 py-3 font-mono text-slate-900">{{ tunnel.id }}</td>
+                <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.listen }}</td>
+                <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.target || "-" }}</td>
+                <td class="px-5 py-3 font-mono text-slate-600">{{ tunnel.client_id }}</td>
+                <td class="px-5 py-3">{{ tunnel.enabled ? "启用" : "停用" }}</td>
+                <td class="px-5 py-3 font-mono text-slate-900">{{ tunnel.active_connections }}</td>
+                <td class="px-5 py-3 text-slate-600">
+                  {{ formatBytes(tunnel.rx_bytes + tunnel.tx_bytes) }} /
+                  {{ tunnel.traffic_limit_bytes ? formatBytes(tunnel.traffic_limit_bytes) : "不限" }}
+                </td>
+                <td class="px-5 py-3 text-slate-600">{{ formatTime(tunnel.expires_at) }}</td>
+                <td class="px-5 py-3 text-slate-600">{{ formatReason(tunnel.disabled_reason) }}</td>
+                <td class="px-5 py-3">
+                  <div class="flex flex-wrap gap-2">
+                    <button
+                      class="inline-flex items-center gap-1 rounded border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                      :disabled="savingId === tunnel.id"
+                      type="button"
+                      @click="beginEdit(tunnel)"
+                    >
+                      <Pencil :size="14" />
+                      编辑
+                    </button>
+                    <button
+                      class="inline-flex items-center gap-1 rounded border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                      :disabled="deletingId === tunnel.id || savingId === tunnel.id"
+                      type="button"
+                      @click="confirmDelete(tunnel)"
+                    >
+                      <Trash2 :size="14" />
+                      {{ deletingId === tunnel.id ? "删除中" : "删除" }}
+                    </button>
+                  </div>
+                </td>
+              </tr>
+              <tr v-if="editingId === tunnel.id" class="bg-slate-50">
+                <td class="px-5 py-4" colspan="10">
+                  <form class="grid gap-4 lg:grid-cols-6" @submit.prevent="saveEdit(tunnel)">
+                    <label class="block">
+                      <span class="text-sm text-slate-600">客户端</span>
+                      <select
+                        v-model="editForm.client_id"
+                        class="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm"
+                      >
+                        <option v-for="client in clients" :key="client.id" :value="client.id">
+                          {{ client.remark || client.id }}
+                        </option>
+                      </select>
+                    </label>
+                    <label class="block">
+                      <span class="text-sm text-slate-600">监听地址</span>
+                      <input
+                        v-model="editForm.listen"
+                        class="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-sm"
+                        required
+                      />
+                    </label>
+                    <label class="block">
+                      <span class="text-sm text-slate-600">目标地址</span>
+                      <input
+                        v-model="editForm.target"
+                        class="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-sm"
+                        required
+                      />
+                    </label>
+                    <label class="block">
+                      <span class="text-sm text-slate-600">到期时间</span>
+                      <input
+                        v-model="editForm.expires_at"
+                        class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                        type="datetime-local"
+                      />
+                    </label>
+                    <label class="block">
+                      <span class="text-sm text-slate-600">流量上限 MB</span>
+                      <input
+                        v-model="editForm.traffic_limit_mb"
+                        class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                        min="0"
+                        step="1"
+                        type="number"
+                      />
+                    </label>
+                    <div class="flex items-end gap-3">
+                      <label class="flex items-center gap-2 pb-2 text-sm">
+                        <input v-model="editForm.enabled" type="checkbox" />
+                        启用
+                      </label>
+                      <button
+                        class="inline-flex items-center gap-1 rounded bg-[#18c6a3] px-4 py-2 text-sm font-medium text-white hover:bg-[#13ad8e] disabled:bg-slate-400"
+                        :disabled="savingId === tunnel.id"
+                        type="submit"
+                      >
+                        <Save :size="15" />
+                        {{ savingId === tunnel.id ? "保存中" : "保存" }}
+                      </button>
+                      <button
+                        class="inline-flex items-center gap-1 rounded border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-white"
+                        type="button"
+                        @click="cancelEdit"
+                      >
+                        <X :size="15" />
+                        取消
+                      </button>
+                    </div>
+                  </form>
+                </td>
+              </tr>
+            </template>
             <tr v-if="tunnels.length === 0">
               <td class="px-5 py-8 text-center text-slate-500" colspan="10">暂无隧道</td>
             </tr>

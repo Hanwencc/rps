@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::sse::{Event, KeepAlive, Sse},
-    routing::{delete, get, post},
+    routing::{get, post, put},
 };
 use hmac::{Hmac, Mac};
 use rps_core::config::{ProxyListenConfig, TunnelMode};
@@ -59,6 +59,13 @@ struct CreateClientRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdateClientRequest {
+    psk: String,
+    enabled: bool,
+    remark: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateTunnelRequest {
     id: Option<String>,
     client_id: String,
@@ -66,6 +73,17 @@ struct CreateTunnelRequest {
     listen: String,
     target: Option<String>,
     enabled: Option<bool>,
+    expires_at: Option<i64>,
+    traffic_limit_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateTunnelRequest {
+    client_id: String,
+    mode: TunnelMode,
+    listen: String,
+    target: Option<String>,
+    enabled: bool,
     expires_at: Option<i64>,
     traffic_limit_bytes: Option<u64>,
 }
@@ -137,6 +155,18 @@ struct CreateProxyAccountRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdateProxyAccountRequest {
+    kind: String,
+    client_id: String,
+    username: String,
+    password: String,
+    enabled: bool,
+    remark: Option<String>,
+    expires_at: Option<i64>,
+    traffic_limit_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct LoginRequest {
     username: String,
     password: String,
@@ -177,15 +207,24 @@ async fn run_inner(state: AppState) -> anyhow::Result<()> {
         .route("/api/events", get(events))
         .route("/api/status", get(status))
         .route("/api/clients", get(clients).post(create_client))
-        .route("/api/clients/{id}", delete(delete_client))
+        .route(
+            "/api/clients/{id}",
+            put(update_client).delete(delete_client),
+        )
         .route("/api/tunnels", get(tunnels).post(create_tunnel))
-        .route("/api/tunnels/{id}", delete(delete_tunnel))
+        .route(
+            "/api/tunnels/{id}",
+            put(update_tunnel).delete(delete_tunnel),
+        )
         .route("/api/proxy", get(proxy))
         .route(
             "/api/proxy-accounts",
             get(proxy_accounts).post(create_proxy_account),
         )
-        .route("/api/proxy-accounts/{id}", delete(delete_proxy_account))
+        .route(
+            "/api/proxy-accounts/{id}",
+            put(update_proxy_account).delete(delete_proxy_account),
+        )
         .fallback_service(ServeDir::new(&web_dir).fallback(ServeFile::new(index)))
         .with_state(state);
 
@@ -378,6 +417,50 @@ async fn create_client(
     ))
 }
 
+async fn update_client(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateClientRequest>,
+) -> Result<Json<ClientResponse>, ApiError> {
+    require_auth(&headers, &state)?;
+    let old = state.db.get_client(&id).await?.ok_or_else(|| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("client {id} not found"),
+    })?;
+    let psk = request.psk.trim();
+    if psk.is_empty() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "psk is required".to_string(),
+        });
+    }
+    let client = state
+        .db
+        .update_client(
+            &id,
+            crate::db::UpdateClient {
+                psk: psk.to_string(),
+                enabled: request.enabled,
+                remark: request.remark.filter(|value| !value.trim().is_empty()),
+                max_connections: old.max_connections,
+                compress: old.compress,
+                encrypt: old.encrypt,
+            },
+        )
+        .await?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("client {id} not found"),
+        })?;
+
+    if !client.enabled || client.psk != old.psk {
+        state.clients.remove(&id);
+    }
+
+    Ok(Json(client_response(&state, client).await?))
+}
+
 async fn delete_client(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -482,6 +565,79 @@ async fn create_tunnel(
         StatusCode::CREATED,
         Json(tunnel_response(&state, tunnel).await),
     ))
+}
+
+async fn update_tunnel(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateTunnelRequest>,
+) -> Result<Json<TunnelResponse>, ApiError> {
+    require_auth(&headers, &state)?;
+    if state.db.get_tunnel(&id).await?.is_none() {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("tunnel {id} not found"),
+        });
+    }
+    if state.db.get_client(&request.client_id).await?.is_none() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("client {} not found", request.client_id),
+        });
+    }
+    let target = request
+        .target
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "target is required".to_string(),
+        })?;
+    let tunnel = state
+        .db
+        .update_tunnel(
+            &id,
+            crate::db::UpdateTunnel {
+                client_id: request.client_id,
+                mode: request.mode,
+                listen: request.listen,
+                target: Some(target),
+                enabled: request.enabled,
+                expires_at: request.expires_at,
+                traffic_limit_bytes: request.traffic_limit_bytes,
+            },
+        )
+        .await?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("tunnel {id} not found"),
+        })?;
+
+    state.tunnel_manager.stop(&id).await?;
+    let key = crate::policy::tunnel_key(tunnel.id.clone());
+    if tunnel.enabled {
+        state.policy.register(
+            key.clone(),
+            tunnel.expires_at,
+            tunnel.traffic_limit_bytes,
+            tunnel.rx_bytes.saturating_add(tunnel.tx_bytes),
+        );
+        let tunnel_config = tunnel_config_from_db(&tunnel);
+        if let Err(err) = state
+            .tunnel_manager
+            .start(state.clone(), tunnel_config)
+            .await
+        {
+            let _ = state.db.disable_tunnel(&tunnel.id, "start_failed").await;
+            state.policy.remove(&key);
+            return Err(ApiError::from(err));
+        }
+    } else {
+        state.policy.remove(&key);
+    }
+
+    let tunnel = state.db.get_tunnel(&id).await?.unwrap_or(tunnel);
+    Ok(Json(tunnel_response(&state, tunnel).await))
 }
 
 async fn delete_tunnel(
@@ -626,6 +782,73 @@ async fn create_proxy_account(
         StatusCode::CREATED,
         Json(proxy_account_response(&state, account)),
     ))
+}
+
+async fn update_proxy_account(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateProxyAccountRequest>,
+) -> Result<Json<ProxyAccountResponse>, ApiError> {
+    require_auth(&headers, &state)?;
+    if state.db.get_proxy_account(&id).await?.is_none() {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("proxy account {id} not found"),
+        });
+    }
+    if state.db.get_client(&request.client_id).await?.is_none() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("client {} not found", request.client_id),
+        });
+    }
+    let username = request.username.trim();
+    let password = request.password.trim();
+    if username.is_empty() || password.is_empty() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: "username and password are required".to_string(),
+        });
+    }
+    let account = state
+        .db
+        .update_proxy_account(
+            &id,
+            crate::db::UpdateProxyAccount {
+                kind: request.kind,
+                client_id: request.client_id,
+                username: username.to_string(),
+                password: password.to_string(),
+                enabled: request.enabled,
+                remark: request.remark.filter(|value| !value.trim().is_empty()),
+                expires_at: request.expires_at,
+                traffic_limit_bytes: request.traffic_limit_bytes,
+            },
+        )
+        .await?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("proxy account {id} not found"),
+        })?;
+
+    state.proxy_manager.revoke_account(&id);
+    let key = crate::policy::proxy_account_key(account.id.clone());
+    if account.enabled {
+        state.policy.register(
+            key,
+            account.expires_at,
+            account.traffic_limit_bytes,
+            account.rx_bytes.saturating_add(account.tx_bytes),
+        );
+        state
+            .policy
+            .allowed(&crate::policy::proxy_account_key(account.id.clone()));
+    } else {
+        state.policy.remove(&key);
+    }
+
+    Ok(Json(proxy_account_response(&state, account)))
 }
 
 async fn delete_proxy_account(

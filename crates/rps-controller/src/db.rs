@@ -68,6 +68,16 @@ pub struct NewClient {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpdateClient {
+    pub psk: String,
+    pub enabled: bool,
+    pub remark: Option<String>,
+    pub max_connections: Option<u32>,
+    pub compress: bool,
+    pub encrypt: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewTunnel {
     pub id: String,
     pub client_id: String,
@@ -80,8 +90,31 @@ pub struct NewTunnel {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpdateTunnel {
+    pub client_id: String,
+    pub mode: TunnelMode,
+    pub listen: String,
+    pub target: Option<String>,
+    pub enabled: bool,
+    pub expires_at: Option<i64>,
+    pub traffic_limit_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewProxyAccount {
     pub id: String,
+    pub kind: String,
+    pub client_id: String,
+    pub username: String,
+    pub password: String,
+    pub enabled: bool,
+    pub remark: Option<String>,
+    pub expires_at: Option<i64>,
+    pub traffic_limit_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateProxyAccount {
     pub kind: String,
     pub client_id: String,
     pub username: String,
@@ -492,6 +525,41 @@ impl Database {
         row.map(row_to_client).transpose()
     }
 
+    pub async fn update_client(
+        &self,
+        id: &str,
+        input: UpdateClient,
+    ) -> anyhow::Result<Option<DbClient>> {
+        let result = sqlx::query(
+            r#"
+            update clients
+            set psk = ?,
+                enabled = ?,
+                remark = ?,
+                max_connections = ?,
+                compress = ?,
+                encrypt = ?,
+                updated_at = ?
+            where id = ?
+            "#,
+        )
+        .bind(&input.psk)
+        .bind(bool_to_i64(input.enabled))
+        .bind(&input.remark)
+        .bind(input.max_connections.map(i64::from))
+        .bind(bool_to_i64(input.compress))
+        .bind(bool_to_i64(input.encrypt))
+        .bind(now_secs())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_client(id).await
+    }
+
     pub async fn find_enabled_client_by_id(&self, id: &str) -> anyhow::Result<Option<DbClient>> {
         let row = sqlx::query(
             "select id, psk, enabled, remark, max_connections, compress, encrypt from clients where enabled = 1 and id = ?",
@@ -550,6 +618,16 @@ impl Database {
         rows.into_iter().map(row_to_tunnel).collect()
     }
 
+    pub async fn get_tunnel(&self, id: &str) -> anyhow::Result<Option<DbTunnel>> {
+        let row = sqlx::query(
+            "select id, client_id, mode, listen, target, enabled, expires_at, traffic_limit_bytes, rx_bytes, tx_bytes, disabled_reason from tunnels where id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_tunnel).transpose()
+    }
+
     pub async fn create_tunnel(&self, input: NewTunnel) -> anyhow::Result<DbTunnel> {
         let now = now_secs();
         sqlx::query(
@@ -587,6 +665,46 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn update_tunnel(
+        &self,
+        id: &str,
+        input: UpdateTunnel,
+    ) -> anyhow::Result<Option<DbTunnel>> {
+        let disabled_reason = if input.enabled { None } else { Some("manual") };
+        let result = sqlx::query(
+            r#"
+            update tunnels
+            set client_id = ?,
+                mode = ?,
+                listen = ?,
+                target = ?,
+                enabled = ?,
+                expires_at = ?,
+                traffic_limit_bytes = ?,
+                disabled_reason = ?,
+                updated_at = ?
+            where id = ?
+            "#,
+        )
+        .bind(&input.client_id)
+        .bind(tunnel_mode_to_str(&input.mode))
+        .bind(&input.listen)
+        .bind(&input.target)
+        .bind(bool_to_i64(input.enabled))
+        .bind(input.expires_at)
+        .bind(input.traffic_limit_bytes.map(u64_to_i64))
+        .bind(disabled_reason)
+        .bind(now_secs())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_tunnel(id).await
     }
 
     pub async fn disable_tunnel(&self, id: &str, reason: &str) -> anyhow::Result<()> {
@@ -670,6 +788,49 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn update_proxy_account(
+        &self,
+        id: &str,
+        input: UpdateProxyAccount,
+    ) -> anyhow::Result<Option<DbProxyAccount>> {
+        validate_proxy_kind(&input.kind)?;
+        let disabled_reason = if input.enabled { None } else { Some("manual") };
+        let result = sqlx::query(
+            r#"
+            update proxy_accounts
+            set kind = ?,
+                client_id = ?,
+                username = ?,
+                password = ?,
+                enabled = ?,
+                remark = ?,
+                expires_at = ?,
+                traffic_limit_bytes = ?,
+                disabled_reason = ?,
+                updated_at = ?
+            where id = ?
+            "#,
+        )
+        .bind(&input.kind)
+        .bind(&input.client_id)
+        .bind(&input.username)
+        .bind(&input.password)
+        .bind(bool_to_i64(input.enabled))
+        .bind(&input.remark)
+        .bind(input.expires_at)
+        .bind(input.traffic_limit_bytes.map(u64_to_i64))
+        .bind(disabled_reason)
+        .bind(now_secs())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_proxy_account(id).await
     }
 
     pub async fn disable_proxy_account(&self, id: &str, reason: &str) -> anyhow::Result<()> {

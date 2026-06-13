@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Activity, Trash2 } from "lucide-vue-next";
+import { Activity, Pencil, Save, Trash2, X } from "lucide-vue-next";
 import StatusBadge from "../components/StatusBadge.vue";
 import type {
   ClientResponse,
   CreateProxyAccountPayload,
   ProxyAccountResponse,
   ProxyListenConfig,
+  UpdateProxyAccountPayload,
 } from "../types";
 
 const props = defineProps<{
@@ -16,15 +17,27 @@ const props = defineProps<{
   accounts: ProxyAccountResponse[];
   creating: boolean;
   deletingId: string | null;
+  savingId: string | null;
   error: string | null;
 }>();
 
 const emit = defineEmits<{
   create: [payload: CreateProxyAccountPayload];
+  update: [id: string, payload: UpdateProxyAccountPayload];
   delete: [id: string];
 }>();
 
 const form = ref({
+  client_id: "",
+  username: "",
+  password: "",
+  enabled: true,
+  remark: "",
+  expires_at: "",
+  traffic_limit_mb: "",
+});
+const editingId = ref<string | null>(null);
+const editForm = ref({
   client_id: "",
   username: "",
   password: "",
@@ -76,6 +89,37 @@ function confirmDelete(account: ProxyAccountResponse) {
   }
 }
 
+function beginEdit(account: ProxyAccountResponse) {
+  editingId.value = account.id;
+  editForm.value = {
+    client_id: account.client_id,
+    username: account.username,
+    password: account.password,
+    enabled: account.enabled,
+    remark: account.remark || "",
+    expires_at: unixToDatetimeLocal(account.expires_at),
+    traffic_limit_mb: bytesToMegabytes(account.traffic_limit_bytes),
+  };
+}
+
+function cancelEdit() {
+  editingId.value = null;
+}
+
+function saveEdit(account: ProxyAccountResponse) {
+  emit("update", account.id, {
+    kind: props.kind,
+    client_id: editForm.value.client_id,
+    username: editForm.value.username.trim(),
+    password: editForm.value.password.trim(),
+    enabled: editForm.value.enabled,
+    remark: editForm.value.remark.trim() || null,
+    expires_at: datetimeLocalToUnix(editForm.value.expires_at),
+    traffic_limit_bytes: megabytesToBytes(editForm.value.traffic_limit_mb),
+  });
+  editingId.value = null;
+}
+
 function datetimeLocalToUnix(value: string) {
   if (!value) {
     return null;
@@ -84,12 +128,25 @@ function datetimeLocalToUnix(value: string) {
   return Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : null;
 }
 
+function unixToDatetimeLocal(value: number | null) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value * 1000);
+  const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
 function megabytesToBytes(value: string) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return null;
   }
   return Math.floor(parsed * 1024 * 1024);
+}
+
+function bytesToMegabytes(value: number | null) {
+  return value ? String(Math.ceil(value / 1024 / 1024)) : "";
 }
 
 function formatBytes(bytes: number | null) {
@@ -260,32 +317,125 @@ function formatReason(value: string | null) {
                 暂无账号。未创建账号时，该代理端口保持无认证兼容模式。
               </td>
             </tr>
-            <tr v-for="account in filteredAccounts" :key="account.id">
-              <td class="px-5 py-3 font-mono text-slate-900">{{ account.id }}</td>
-              <td class="px-5 py-3 font-mono text-slate-600">{{ account.client_id }}</td>
-              <td class="px-5 py-3 font-mono text-slate-600">{{ account.username }}</td>
-              <td class="px-5 py-3 font-mono text-slate-600">{{ account.password }}</td>
-              <td class="px-5 py-3"><StatusBadge :enabled="account.enabled" /></td>
-              <td class="px-5 py-3 font-mono text-slate-900">{{ account.active_connections }}</td>
-              <td class="px-5 py-3 text-slate-600">
-                {{ formatBytes(account.rx_bytes + account.tx_bytes) }} /
-                {{ account.traffic_limit_bytes ? formatBytes(account.traffic_limit_bytes) : "不限" }}
-              </td>
-              <td class="px-5 py-3 text-slate-600">{{ formatTime(account.expires_at) }}</td>
-              <td class="px-5 py-3 text-slate-600">{{ formatReason(account.disabled_reason) }}</td>
-              <td class="px-5 py-3 text-slate-600">{{ account.remark || "-" }}</td>
-              <td class="px-5 py-3">
-                <button
-                  class="inline-flex items-center gap-1 rounded border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
-                  :disabled="deletingId === account.id"
-                  type="button"
-                  @click="confirmDelete(account)"
-                >
-                  <Trash2 :size="14" />
-                  {{ deletingId === account.id ? "删除中" : "删除" }}
-                </button>
-              </td>
-            </tr>
+            <template v-for="account in filteredAccounts" :key="account.id">
+              <tr>
+                <td class="px-5 py-3 font-mono text-slate-900">{{ account.id }}</td>
+                <td class="px-5 py-3 font-mono text-slate-600">{{ account.client_id }}</td>
+                <td class="px-5 py-3 font-mono text-slate-600">{{ account.username }}</td>
+                <td class="px-5 py-3 font-mono text-slate-600">{{ account.password }}</td>
+                <td class="px-5 py-3"><StatusBadge :enabled="account.enabled" /></td>
+                <td class="px-5 py-3 font-mono text-slate-900">{{ account.active_connections }}</td>
+                <td class="px-5 py-3 text-slate-600">
+                  {{ formatBytes(account.rx_bytes + account.tx_bytes) }} /
+                  {{ account.traffic_limit_bytes ? formatBytes(account.traffic_limit_bytes) : "不限" }}
+                </td>
+                <td class="px-5 py-3 text-slate-600">{{ formatTime(account.expires_at) }}</td>
+                <td class="px-5 py-3 text-slate-600">{{ formatReason(account.disabled_reason) }}</td>
+                <td class="px-5 py-3 text-slate-600">{{ account.remark || "-" }}</td>
+                <td class="px-5 py-3">
+                  <div class="flex flex-wrap gap-2">
+                    <button
+                      class="inline-flex items-center gap-1 rounded border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                      :disabled="savingId === account.id"
+                      type="button"
+                      @click="beginEdit(account)"
+                    >
+                      <Pencil :size="14" />
+                      编辑
+                    </button>
+                    <button
+                      class="inline-flex items-center gap-1 rounded border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                      :disabled="deletingId === account.id || savingId === account.id"
+                      type="button"
+                      @click="confirmDelete(account)"
+                    >
+                      <Trash2 :size="14" />
+                      {{ deletingId === account.id ? "删除中" : "删除" }}
+                    </button>
+                  </div>
+                </td>
+              </tr>
+              <tr v-if="editingId === account.id" class="bg-slate-50">
+                <td class="px-5 py-4" colspan="11">
+                  <form class="grid gap-4 lg:grid-cols-6" @submit.prevent="saveEdit(account)">
+                    <label class="block">
+                      <span class="text-sm text-slate-600">绑定客户端</span>
+                      <select
+                        v-model="editForm.client_id"
+                        class="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm"
+                      >
+                        <option v-for="client in clients" :key="client.id" :value="client.id">
+                          {{ client.id }}
+                        </option>
+                      </select>
+                    </label>
+                    <label class="block">
+                      <span class="text-sm text-slate-600">账号</span>
+                      <input
+                        v-model="editForm.username"
+                        class="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-sm"
+                        required
+                      />
+                    </label>
+                    <label class="block">
+                      <span class="text-sm text-slate-600">密码</span>
+                      <input
+                        v-model="editForm.password"
+                        class="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-sm"
+                        required
+                      />
+                    </label>
+                    <label class="block">
+                      <span class="text-sm text-slate-600">备注</span>
+                      <input
+                        v-model="editForm.remark"
+                        class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                      />
+                    </label>
+                    <label class="block">
+                      <span class="text-sm text-slate-600">到期时间</span>
+                      <input
+                        v-model="editForm.expires_at"
+                        class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                        type="datetime-local"
+                      />
+                    </label>
+                    <label class="block">
+                      <span class="text-sm text-slate-600">流量上限 MB</span>
+                      <input
+                        v-model="editForm.traffic_limit_mb"
+                        class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                        min="0"
+                        step="1"
+                        type="number"
+                      />
+                    </label>
+                    <div class="flex items-end gap-3 lg:col-span-6">
+                      <label class="flex items-center gap-2 pb-2 text-sm">
+                        <input v-model="editForm.enabled" type="checkbox" />
+                        启用
+                      </label>
+                      <button
+                        class="inline-flex items-center gap-1 rounded bg-[#18c6a3] px-4 py-2 text-sm font-medium text-white hover:bg-[#13ad8e] disabled:bg-slate-400"
+                        :disabled="savingId === account.id"
+                        type="submit"
+                      >
+                        <Save :size="15" />
+                        {{ savingId === account.id ? "保存中" : "保存" }}
+                      </button>
+                      <button
+                        class="inline-flex items-center gap-1 rounded border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-white"
+                        type="button"
+                        @click="cancelEdit"
+                      >
+                        <X :size="15" />
+                        取消
+                      </button>
+                    </div>
+                  </form>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>

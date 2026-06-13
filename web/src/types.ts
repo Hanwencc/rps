@@ -125,11 +125,38 @@ export type CreateClientPayload = {
   enabled: boolean;
 };
 
+export type UpdateClientPayload = {
+  psk: string;
+  remark: string | null;
+  enabled: boolean;
+};
+
 export type CreateProxyAccountPayload = {
   kind: "http" | "socks5";
   client_id: string;
   username: string | null;
   password: string | null;
+  enabled: boolean;
+  remark: string | null;
+  expires_at: number | null;
+  traffic_limit_bytes: number | null;
+};
+
+export type UpdateTunnelPayload = {
+  client_id: string;
+  mode: "tcp" | "udp";
+  listen: string;
+  target: string;
+  enabled: boolean;
+  expires_at: number | null;
+  traffic_limit_bytes: number | null;
+};
+
+export type UpdateProxyAccountPayload = {
+  kind: "http" | "socks5";
+  client_id: string;
+  username: string;
+  password: string;
   enabled: boolean;
   remark: string | null;
   expires_at: number | null;
