@@ -1,3 +1,4 @@
 pub mod config;
+pub mod net;
 pub mod noise;
 pub mod protocol;

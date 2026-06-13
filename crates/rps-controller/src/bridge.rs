@@ -31,7 +31,7 @@ async fn handle_conn(
     mut stream: TcpStream,
     remote_addr: String,
 ) -> anyhow::Result<()> {
-    stream.set_nodelay(true)?;
+    rps_core::net::tune_cross_border(&stream)?;
     let prelude: NoisePrelude = read_json(&mut stream).await?;
     if prelude.magic != MAGIC {
         anyhow::bail!("bad magic");

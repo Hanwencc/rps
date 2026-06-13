@@ -18,7 +18,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
     net::{TcpStream, UdpSocket},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const TCP_COPY_BUF_SIZE: usize = 64 * 1024;
 const POOL_COPY_BUF_SIZE: usize = 128 * 1024;
@@ -96,16 +96,16 @@ async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
     let control = connect_role(&config, HelloRole::Control).await?;
     let data = connect_role(&config, HelloRole::Data).await?;
 
-    // Background tasks (control heartbeat + pre-warmed pool workers) are tracked so
+    // Background tasks (control heartbeat + elastic pool manager) are tracked so
     // they are torn down together when the data mux session ends.
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(async move {
         run_control(control).await;
     });
-    for _ in 0..POOL_SIZE {
+    {
         let config = config.clone();
         tasks.spawn(async move {
-            run_pool_worker(config).await;
+            run_pool_manager(config).await;
         });
     }
 
@@ -123,33 +123,67 @@ async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A pre-warmed pool worker keeps one mux-free TCP connection parked in the
-/// controller's pool. Once the controller assigns it a target it serves that one
-/// request via a direct bidirectional copy, then reconnects to refill the pool.
-async fn run_pool_worker(config: AgentConfig) {
+/// Elastic pre-warmed pool manager.
+///
+/// Keeps exactly `POOL_SIZE` warm (idle) connections parked in the controller's
+/// pool at all times, while the number of *active* relays it serves is unbounded.
+/// A warm connection holds a semaphore permit; the moment the controller assigns
+/// it a target the permit is released so a replacement warm connection is dialled
+/// immediately, and the now-busy connection is detached as an independent relay.
+/// This decouples "warm buffer size" from "concurrent active connections", which
+/// is what previously caused pool exhaustion under many long-lived connections.
+async fn run_pool_manager(config: AgentConfig) {
+    let warm_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(POOL_SIZE));
     loop {
-        match connect_role(&config, HelloRole::Pool).await {
-            Ok(stream) => {
-                if let Err(err) = serve_pool_stream(stream).await {
-                    warn!(error = %err, "pool worker stream ended");
-                }
-            }
-            Err(err) => {
-                warn!(error = %err, "pool worker connect failed");
-                tokio::time::sleep(Duration::from_secs(config.reconnect_interval_secs.max(1)))
+        let permit = match warm_slots.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return,
+        };
+        let config = config.clone();
+        tokio::spawn(async move {
+            // Establish a warm pooled connection. The permit is held while it is idle.
+            let mut stream = match connect_role(&config, HelloRole::Pool).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    warn!(error = %err, "pool warm connect failed");
+                    // Back off while still holding the permit so we don't hammer the
+                    // controller when it is unreachable.
+                    tokio::time::sleep(Duration::from_secs(
+                        config.reconnect_interval_secs.max(1),
+                    ))
                     .await;
+                    drop(permit);
+                    return;
+                }
+            };
+
+            // Block until the controller assigns a target (connection is consumed).
+            let request: OpenRequest = match read_json(&mut stream).await {
+                Ok(request) => request,
+                Err(err) => {
+                    // Idle warm connection died, commonly a cross-border idle reset.
+                    // Recycle it quietly; the manager will dial a replacement.
+                    debug!(error = %err, "warm pool connection recycled before use");
+                    drop(permit);
+                    return;
+                }
+            };
+
+            // Consumed: free the warm slot so a replacement is dialled right away,
+            // then serve this request as an unbounded, dedicated relay.
+            drop(permit);
+            if let Err(err) = serve_pool_request(stream, request).await {
+                debug!(error = %err, "pool relay ended");
             }
-        }
+        });
     }
 }
 
-async fn serve_pool_stream(mut stream: DuplexStream) -> anyhow::Result<()> {
-    let request: OpenRequest = read_json(&mut stream)
-        .await
-        .context("read pool open request")?;
+async fn serve_pool_request(stream: DuplexStream, request: OpenRequest) -> anyhow::Result<()> {
     match request.protocol {
         TargetProtocol::Tcp => handle_pool_tcp(stream, request).await,
         TargetProtocol::Udp => {
+            let mut stream = stream;
             let _ = write_json(
                 &mut stream,
                 &OpenResponse::err("udp is not supported on pool channel"),
@@ -183,7 +217,7 @@ async fn handle_pool_tcp(mut stream: DuplexStream, request: OpenRequest) -> anyh
                 anyhow::bail!(error);
             }
         };
-    target.set_nodelay(true)?;
+    rps_core::net::tune_cross_border(&target)?;
     write_json(&mut stream, &OpenResponse::ok()).await?;
 
     let (mut stream_read, mut stream_write) = tokio::io::split(stream);
@@ -243,8 +277,9 @@ async fn handle_pool_tcp(mut stream: DuplexStream, request: OpenRequest) -> anyh
 }
 
 async fn connect_role(config: &AgentConfig, role: HelloRole) -> anyhow::Result<DuplexStream> {
-    let mut stream = TcpStream::connect(&config.server_addr).await?;
-    stream.set_nodelay(true)?;
+    let stream = TcpStream::connect(&config.server_addr).await?;
+    rps_core::net::tune_cross_border(&stream)?;
+    let mut stream = stream;
     let prelude = NoisePrelude::new(config.client_id.clone());
     write_json(&mut stream, &prelude).await?;
 
@@ -320,7 +355,7 @@ async fn handle_tcp_target(
                 anyhow::bail!(error);
             }
         };
-    target.set_nodelay(true)?;
+    rps_core::net::tune_cross_border(&target)?;
     send_open_ok(&writer).await?;
     let (mut target_read, mut target_write) = target.into_split();
 
