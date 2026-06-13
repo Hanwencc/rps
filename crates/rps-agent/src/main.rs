@@ -21,6 +21,9 @@ use tokio::{
 use tracing::{info, warn};
 
 const TCP_COPY_BUF_SIZE: usize = 64 * 1024;
+const POOL_COPY_BUF_SIZE: usize = 128 * 1024;
+/// Number of pre-warmed mux-free TCP connections kept ready for bulk traffic.
+const POOL_SIZE: usize = 32;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -93,8 +96,20 @@ async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
     let control = connect_role(&config, HelloRole::Control).await?;
     let data = connect_role(&config, HelloRole::Data).await?;
 
-    tokio::spawn(run_control(control));
+    // Background tasks (control heartbeat + pre-warmed pool workers) are tracked so
+    // they are torn down together when the data mux session ends.
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move {
+        run_control(control).await;
+    });
+    for _ in 0..POOL_SIZE {
+        let config = config.clone();
+        tasks.spawn(async move {
+            run_pool_worker(config).await;
+        });
+    }
 
+    // The data mux still carries UDP datagrams and any control-plane streams.
     let mut mux = Mux::new(data);
     while let Some(stream) = mux.accept().await {
         tokio::spawn(async move {
@@ -102,6 +117,127 @@ async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
                 warn!(error = %err, "mux stream failed");
             }
         });
+    }
+
+    tasks.abort_all();
+    Ok(())
+}
+
+/// A pre-warmed pool worker keeps one mux-free TCP connection parked in the
+/// controller's pool. Once the controller assigns it a target it serves that one
+/// request via a direct bidirectional copy, then reconnects to refill the pool.
+async fn run_pool_worker(config: AgentConfig) {
+    loop {
+        match connect_role(&config, HelloRole::Pool).await {
+            Ok(stream) => {
+                if let Err(err) = serve_pool_stream(stream).await {
+                    warn!(error = %err, "pool worker stream ended");
+                }
+            }
+            Err(err) => {
+                warn!(error = %err, "pool worker connect failed");
+                tokio::time::sleep(Duration::from_secs(config.reconnect_interval_secs.max(1)))
+                    .await;
+            }
+        }
+    }
+}
+
+async fn serve_pool_stream(mut stream: DuplexStream) -> anyhow::Result<()> {
+    let request: OpenRequest = read_json(&mut stream)
+        .await
+        .context("read pool open request")?;
+    match request.protocol {
+        TargetProtocol::Tcp => handle_pool_tcp(stream, request).await,
+        TargetProtocol::Udp => {
+            let _ = write_json(
+                &mut stream,
+                &OpenResponse::err("udp is not supported on pool channel"),
+            )
+            .await;
+            anyhow::bail!("udp request received on pool channel");
+        }
+    }
+}
+
+async fn handle_pool_tcp(mut stream: DuplexStream, request: OpenRequest) -> anyhow::Result<()> {
+    let target =
+        match tokio::time::timeout(open_timeout(&request), TcpStream::connect(&request.target))
+            .await
+        {
+            Ok(Ok(target)) => target,
+            Ok(Err(err)) => {
+                let _ = write_json(
+                    &mut stream,
+                    &OpenResponse::err(format!("tcp connect {} failed: {err}", request.target)),
+                )
+                .await;
+                return Err(err.into());
+            }
+            Err(_) => {
+                let error = format!(
+                    "tcp connect {} timed out after {}ms",
+                    request.target, request.timeout_ms
+                );
+                let _ = write_json(&mut stream, &OpenResponse::err(error.clone())).await;
+                anyhow::bail!(error);
+            }
+        };
+    target.set_nodelay(true)?;
+    write_json(&mut stream, &OpenResponse::ok()).await?;
+
+    let (mut stream_read, mut stream_write) = tokio::io::split(stream);
+    let (mut target_read, mut target_write) = target.into_split();
+
+    // Uplink: controller -> target.
+    let mut uplink = tokio::spawn(async move {
+        let mut buf = vec![0_u8; POOL_COPY_BUF_SIZE];
+        loop {
+            let n = stream_read.read(&mut buf).await?;
+            if n == 0 {
+                let _ = target_write.shutdown().await;
+                break;
+            }
+            target_write.write_all(&buf[..n]).await?;
+        }
+        anyhow::Ok(())
+    });
+
+    // Downlink: target -> controller.
+    let mut downlink = tokio::spawn(async move {
+        let mut buf = vec![0_u8; POOL_COPY_BUF_SIZE];
+        loop {
+            let n = target_read.read(&mut buf).await?;
+            if n == 0 {
+                let _ = stream_write.shutdown().await;
+                break;
+            }
+            stream_write.write_all(&buf[..n]).await?;
+        }
+        anyhow::Ok(())
+    });
+
+    tokio::select! {
+        result = &mut uplink => {
+            if matches!(result, Err(_) | Ok(Err(_))) {
+                downlink.abort();
+            }
+            let res2 = downlink.await;
+            result??;
+            if let Ok(Err(e)) = res2 {
+                return Err(e);
+            }
+        }
+        result = &mut downlink => {
+            if matches!(result, Err(_) | Ok(Err(_))) {
+                uplink.abort();
+            }
+            let res2 = uplink.await;
+            result??;
+            if let Ok(Err(e)) = res2 {
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }
@@ -188,7 +324,6 @@ async fn handle_tcp_target(
     send_open_ok(&writer).await?;
     let (mut target_read, mut target_write) = target.into_split();
 
-    let writer_up = writer.clone();
     let mut uplink = tokio::spawn(async move {
         while let Some(data) = reader.recv_data().await {
             if let Err(e) = target_write.write_all(&data).await {

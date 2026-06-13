@@ -1,7 +1,7 @@
 use crate::{AppState, proxy_tcp};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
-use rps_core::{config::ProxyListenConfig, protocol::TargetProtocol};
+use rps_core::config::ProxyListenConfig;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -71,20 +71,13 @@ async fn handle_http_proxy(
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let recorder = proxy_tcp::TrafficRecorder::new(&state, &route);
-        let stream = proxy_tcp::open_stream(
-            state,
-            &route,
-            TargetProtocol::Tcp,
-            uri.to_string(),
-            remote_addr,
-        )
-        .await?;
+        let stream =
+            proxy_tcp::open_pool_stream(state, &route, uri.to_string(), remote_addr).await?;
         socket
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
         let result =
-            proxy_tcp::pipe_tcp_mux_with_shutdown(socket, stream, None, Some(recorder), shutdown)
-                .await;
+            proxy_tcp::pipe_pool_with_shutdown(socket, stream, None, Some(recorder), shutdown).await;
         drop(session_guard);
         return result;
     }
@@ -92,9 +85,8 @@ async fn handle_http_proxy(
     let target = http_target(uri, header_text)?;
     let rewritten = rewrite_absolute_form(method, uri, version, header_text);
     let recorder = proxy_tcp::TrafficRecorder::new(&state, &route);
-    let stream =
-        proxy_tcp::open_stream(state, &route, TargetProtocol::Tcp, target, remote_addr).await?;
-    let result = proxy_tcp::pipe_tcp_mux_with_shutdown(
+    let stream = proxy_tcp::open_pool_stream(state, &route, target, remote_addr).await?;
+    let result = proxy_tcp::pipe_pool_with_shutdown(
         socket,
         stream,
         Some(Bytes::from(rewritten)),

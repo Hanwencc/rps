@@ -11,6 +11,7 @@ const MAX_JSON_MESSAGE_LEN: usize = 1024 * 1024;
 pub enum HelloRole {
     Control,
     Data,
+    Pool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

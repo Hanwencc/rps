@@ -44,19 +44,34 @@ pub(crate) struct AppState {
 #[derive(Clone)]
 pub(crate) struct ClientConnection {
     mux: MuxHandle,
+    pool_tx: tokio::sync::mpsc::UnboundedSender<tokio::io::DuplexStream>,
+    pool_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<tokio::io::DuplexStream>>>,
     data_session_id: String,
 }
 
 impl ClientConnection {
     pub(crate) fn new(mux: MuxHandle, data_session_id: String) -> Self {
+        let (pool_tx, pool_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             mux,
+            pool_tx,
+            pool_rx: Arc::new(tokio::sync::Mutex::new(pool_rx)),
             data_session_id,
         }
     }
 
     pub(crate) fn mux(&self) -> MuxHandle {
         self.mux.clone()
+    }
+
+    pub(crate) fn pool_tx(&self) -> tokio::sync::mpsc::UnboundedSender<tokio::io::DuplexStream> {
+        self.pool_tx.clone()
+    }
+
+    pub(crate) fn pool_rx(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<tokio::io::DuplexStream>>> {
+        self.pool_rx.clone()
     }
 
     pub(crate) fn data_session_id(&self) -> &str {

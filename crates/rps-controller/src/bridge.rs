@@ -110,6 +110,21 @@ async fn handle_conn(
                 .record_agent_disconnected(&session_id, &client.id)
                 .await;
         }
+        HelloRole::Pool => {
+            // Pre-warmed raw data connection: hand the noise stream to the client's
+            // connection pool so TCP proxying can grab a dedicated, mux-free channel.
+            match state.clients.get(&client.id).map(|conn| conn.pool_tx()) {
+                Some(pool_tx) => {
+                    if pool_tx.send(stream).is_err() {
+                        warn!(client_id = %client.id, "pool channel closed, dropping data connection");
+                    }
+                    // The noise transport stays alive while the stream is parked in the pool.
+                }
+                None => {
+                    warn!(client_id = %client.id, "pool connection arrived before data session, dropping");
+                }
+            }
+        }
     }
 
     Ok(())

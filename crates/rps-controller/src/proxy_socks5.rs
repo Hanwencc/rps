@@ -314,10 +314,9 @@ async fn handle_connect(
         client_id: auth.client_id,
     };
     let recorder = proxy_tcp::TrafficRecorder::new(&state, &route);
-    let stream = match proxy_tcp::open_stream(
+    let stream = match proxy_tcp::open_pool_stream(
         state.clone(),
         &route,
-        TargetProtocol::Tcp,
         target.clone(),
         remote_addr.to_string(),
     )
@@ -336,7 +335,7 @@ async fn handle_connect(
     let session_guard = state.proxy_manager.register(account_id);
     let shutdown = session_guard.shutdown_rx();
     let result =
-        proxy_tcp::pipe_tcp_mux_with_shutdown(socket, stream, None, Some(recorder), shutdown).await;
+        proxy_tcp::pipe_pool_with_shutdown(socket, stream, None, Some(recorder), shutdown).await;
     drop(session_guard);
     result
 }
