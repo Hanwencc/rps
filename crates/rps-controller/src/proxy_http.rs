@@ -70,9 +70,6 @@ async fn handle_http_proxy(
     let version = parts.next().unwrap_or("HTTP/1.1");
 
     if method.eq_ignore_ascii_case("CONNECT") {
-        socket
-            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            .await?;
         let recorder = proxy_tcp::TrafficRecorder::new(&state, &route);
         let stream = proxy_tcp::open_stream(
             state,
@@ -82,6 +79,9 @@ async fn handle_http_proxy(
             remote_addr,
         )
         .await?;
+        socket
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
         let result =
             proxy_tcp::pipe_tcp_mux_with_shutdown(socket, stream, None, Some(recorder), shutdown)
                 .await;

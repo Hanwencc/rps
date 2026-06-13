@@ -1,4 +1,4 @@
-use crate::AppState;
+use crate::{AppState, ClientConnection};
 use rps_core::noise;
 use rps_core::protocol::{
     ControlMessage, Hello, HelloAck, HelloRole, MAGIC, NoisePrelude, read_json, write_json,
@@ -82,17 +82,33 @@ async fn handle_conn(
                 .db
                 .record_agent_disconnected(&session_id, &client.id)
                 .await;
-            state.clients.remove(&client.id);
         }
         HelloRole::Data => {
             info!(client_id = %client.id, "agent data mux connected");
-            let _session_id = state
+            let session_id = state
                 .db
                 .record_agent_connected(&client.id, "data", &remote_addr)
                 .await?;
-            let mux = Mux::new(stream);
-            state.clients.insert(client.id.clone(), mux.handle());
-            std::future::pending::<()>().await;
+            let mut mux = Mux::new(stream);
+            state.clients.insert(
+                client.id.clone(),
+                ClientConnection::new(mux.handle(), session_id.clone()),
+            );
+            while let Some(stream) = mux.accept().await {
+                warn!(
+                    client_id = %client.id,
+                    stream_id = stream.id(),
+                    "unexpected inbound stream from agent"
+                );
+            }
+            warn!(client_id = %client.id, "agent data mux disconnected");
+            state.clients.remove_if(&client.id, |_, current| {
+                current.data_session_id() == session_id
+            });
+            let _ = state
+                .db
+                .record_agent_disconnected(&session_id, &client.id)
+                .await;
         }
     }
 

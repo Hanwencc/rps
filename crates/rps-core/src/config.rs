@@ -57,6 +57,7 @@ impl Default for WebAuthConfig {
 pub struct ProxyListenConfig {
     pub listen: String,
     pub client_id: String,
+    pub public_udp_addr: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }

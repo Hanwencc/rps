@@ -34,11 +34,34 @@ pub(crate) struct AppState {
     config: Arc<ControllerConfig>,
     db: Database,
     traffic: TrafficAggregator,
-    clients: Arc<DashMap<String, MuxHandle>>,
+    clients: Arc<DashMap<String, ClientConnection>>,
     web_sessions: Arc<DashMap<String, WebSession>>,
     tunnel_manager: Arc<TunnelManager>,
     proxy_manager: ProxyManager,
     policy: PolicyEnforcer,
+}
+
+#[derive(Clone)]
+pub(crate) struct ClientConnection {
+    mux: MuxHandle,
+    data_session_id: String,
+}
+
+impl ClientConnection {
+    pub(crate) fn new(mux: MuxHandle, data_session_id: String) -> Self {
+        Self {
+            mux,
+            data_session_id,
+        }
+    }
+
+    pub(crate) fn mux(&self) -> MuxHandle {
+        self.mux.clone()
+    }
+
+    pub(crate) fn data_session_id(&self) -> &str {
+        &self.data_session_id
+    }
 }
 
 #[derive(Clone)]

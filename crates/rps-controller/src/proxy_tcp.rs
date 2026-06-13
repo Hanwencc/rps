@@ -2,9 +2,10 @@ use crate::AppState;
 use bytes::Bytes;
 use rps_core::{
     config::TunnelConfig,
-    protocol::{OpenRequest, TargetProtocol},
+    protocol::{OpenRequest, OpenResponse, TargetProtocol},
 };
 use rps_mux::MuxStream;
+use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -133,7 +134,7 @@ pub async fn open_stream(
         .clients
         .get(&route.client_id)
         .ok_or_else(|| anyhow::anyhow!("client {} is offline", route.client_id))?
-        .clone();
+        .mux();
     let request = OpenRequest {
         tunnel_id: route.tunnel_id.clone(),
         protocol,
@@ -142,7 +143,42 @@ pub async fn open_stream(
         timeout_ms: 5000,
     };
     let payload = serde_json::to_vec(&request)?;
-    let stream = mux.open_stream(Bytes::from(payload)).await?;
+    let mut stream = mux.open_stream(Bytes::from(payload)).await?;
+    let response = tokio::time::timeout(
+        Duration::from_millis(request.timeout_ms.max(1)),
+        stream.recv_data(),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "agent open target {} timed out after {}ms",
+                request.target, request.timeout_ms
+            ),
+        )
+    })?
+    .ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "agent closed stream before open response",
+        )
+    })?;
+    let response: OpenResponse = serde_json::from_slice(&response).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid agent open response: {err}"),
+        )
+    })?;
+    if !response.ok {
+        anyhow::bail!(
+            "agent failed to open target {}: {}",
+            request.target,
+            response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
+        );
+    }
     let db = state.db.clone();
     let client_id = route.client_id.clone();
     let tunnel_id = route.tunnel_id.clone();

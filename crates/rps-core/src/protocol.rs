@@ -91,6 +91,28 @@ pub struct OpenRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenResponse {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+impl OpenResponse {
+    pub fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+
+    pub fn err(error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(error.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ControlMessage {
     Ping { ts: u64 },

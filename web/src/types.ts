@@ -52,6 +52,7 @@ export type CreateTunnelPayload = {
 export type ProxyListenConfig = {
   listen: string;
   client_id: string;
+  public_udp_addr: string | null;
   enabled: boolean;
 };
 

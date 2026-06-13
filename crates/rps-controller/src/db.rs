@@ -1185,6 +1185,7 @@ fn row_to_proxy(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<ProxyListenConfi
     Ok(ProxyListenConfig {
         listen: row.try_get("listen")?,
         client_id: row.try_get("client_id")?,
+        public_udp_addr: None,
         enabled: i64_to_bool(row.try_get("enabled")?),
     })
 }

@@ -17,6 +17,8 @@ enabled = true
 
 [server.socks5]
 listen = "0.0.0.0:10083"
+# Public deployments should set this to the controller public UDP address.
+# public_udp_addr = "your-public-ip:10083"
 client_id = "client-1"
 enabled = true
 

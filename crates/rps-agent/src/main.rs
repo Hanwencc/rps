@@ -5,14 +5,14 @@ use rps_core::{
     config::{AgentConfig, AgentConfigRoot, load_agent_config},
     noise,
     protocol::{
-        ControlMessage, Hello, HelloAck, HelloRole, NoisePrelude, OpenRequest, TargetProtocol,
-        read_json, write_json,
+        ControlMessage, Hello, HelloAck, HelloRole, NoisePrelude, OpenRequest, OpenResponse,
+        TargetProtocol, read_json, write_json,
     },
 };
 use rps_mux::Mux;
 use std::{
     env,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
@@ -162,8 +162,30 @@ async fn handle_tcp_target(
     mut reader: rps_mux::MuxStreamReader,
     request: OpenRequest,
 ) -> anyhow::Result<()> {
-    let target = TcpStream::connect(&request.target).await?;
+    let target =
+        match tokio::time::timeout(open_timeout(&request), TcpStream::connect(&request.target))
+            .await
+        {
+            Ok(Ok(target)) => target,
+            Ok(Err(err)) => {
+                send_open_error(
+                    &writer,
+                    format!("tcp connect {} failed: {err}", request.target),
+                )
+                .await?;
+                return Err(err.into());
+            }
+            Err(_) => {
+                let error = format!(
+                    "tcp connect {} timed out after {}ms",
+                    request.target, request.timeout_ms
+                );
+                send_open_error(&writer, error.clone()).await?;
+                anyhow::bail!(error);
+            }
+        };
     target.set_nodelay(true)?;
+    send_open_ok(&writer).await?;
     let (mut target_read, mut target_write) = target.into_split();
 
     let uplink = tokio::spawn(async move {
@@ -195,8 +217,33 @@ async fn handle_udp_target(
     mut reader: rps_mux::MuxStreamReader,
     request: OpenRequest,
 ) -> anyhow::Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    socket.connect(&request.target).await?;
+    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(socket) => socket,
+        Err(err) => {
+            send_open_error(&writer, format!("udp bind failed: {err}")).await?;
+            return Err(err.into());
+        }
+    };
+    match tokio::time::timeout(open_timeout(&request), socket.connect(&request.target)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            send_open_error(
+                &writer,
+                format!("udp connect {} failed: {err}", request.target),
+            )
+            .await?;
+            return Err(err.into());
+        }
+        Err(_) => {
+            let error = format!(
+                "udp connect {} timed out after {}ms",
+                request.target, request.timeout_ms
+            );
+            send_open_error(&writer, error.clone()).await?;
+            anyhow::bail!(error);
+        }
+    }
+    send_open_ok(&writer).await?;
     let socket = std::sync::Arc::new(socket);
 
     let uplink_socket = socket.clone();
@@ -220,6 +267,30 @@ async fn handle_udp_target(
 
     let _ = tokio::try_join!(uplink, downlink)?;
     Ok(())
+}
+
+async fn send_open_ok(writer: &rps_mux::MuxStreamWriter) -> anyhow::Result<()> {
+    writer
+        .send_data(Bytes::from(serde_json::to_vec(&OpenResponse::ok())?))
+        .await?;
+    Ok(())
+}
+
+async fn send_open_error(
+    writer: &rps_mux::MuxStreamWriter,
+    error: impl Into<String>,
+) -> anyhow::Result<()> {
+    writer
+        .send_data(Bytes::from(serde_json::to_vec(&OpenResponse::err(
+            error.into(),
+        ))?))
+        .await?;
+    let _ = writer.close().await;
+    Ok(())
+}
+
+fn open_timeout(request: &OpenRequest) -> Duration {
+    Duration::from_millis(request.timeout_ms.max(1))
 }
 
 fn now_secs() -> u64 {

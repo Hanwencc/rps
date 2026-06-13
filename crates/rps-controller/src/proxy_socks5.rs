@@ -112,11 +112,23 @@ pub async fn run(state: AppState, proxy: ProxyListenConfig) {
 async fn run_inner(state: AppState, proxy: ProxyListenConfig) -> anyhow::Result<()> {
     let tcp_listener = TcpListener::bind(&proxy.listen).await?;
     let udp_socket = Arc::new(UdpSocket::bind(&proxy.listen).await?);
-    let udp_addr = udp_socket.local_addr()?;
+    let udp_bind_addr = udp_socket.local_addr()?;
+    let udp_addr = match proxy.public_udp_addr.as_deref() {
+        Some(addr) => addr
+            .parse::<SocketAddr>()
+            .map_err(|err| anyhow::anyhow!("invalid socks5 public_udp_addr {addr}: {err}"))?,
+        None => udp_bind_addr,
+    };
     let associations = Arc::new(DashMap::<IpAddr, Arc<SocksUdpAssociation>>::new());
     let sessions = Arc::new(DashMap::<SocksUdpSessionKey, SocksUdpSession>::new());
 
-    info!(listen = %proxy.listen, "socks5 proxy listening");
+    if proxy.public_udp_addr.is_none() && udp_addr.ip().is_unspecified() {
+        warn!(
+            udp_addr = %udp_addr,
+            "socks5 udp associate will return an unspecified address; set public_udp_addr for public deployments"
+        );
+    }
+    info!(listen = %proxy.listen, udp_bind_addr = %udp_bind_addr, udp_reply_addr = %udp_addr, "socks5 proxy listening");
 
     tokio::spawn(run_udp_relay(
         state.clone(),
@@ -171,6 +183,12 @@ async fn handle_conn(
     let mut methods = vec![0_u8; hello[1] as usize];
     socket.read_exact(&mut methods).await?;
     let auth = authenticate(&state, &proxy, &mut socket, &methods).await?;
+    debug!(
+        %remote_addr,
+        account_id = ?auth.account_id,
+        client_id = %auth.client_id,
+        "socks5 authentication accepted"
+    );
 
     let mut header = [0_u8; 4];
     socket.read_exact(&mut header).await?;
@@ -287,6 +305,7 @@ async fn handle_connect(
         }
     };
     let account_id = auth.account_id.clone();
+    debug!(%remote_addr, %target, account_id = ?account_id, "socks5 connect request");
     let route = proxy_tcp::StreamRoute {
         tunnel_id: account_id
             .clone()
@@ -299,19 +318,21 @@ async fn handle_connect(
         state.clone(),
         &route,
         TargetProtocol::Tcp,
-        target,
+        target.clone(),
         remote_addr.to_string(),
     )
     .await
     {
         Ok(stream) => stream,
         Err(err) => {
+            warn!(%remote_addr, %target, error = %err, "socks5 connect open stream failed");
             send_reply(&mut socket, REP_GENERAL_FAILURE, None).await?;
             return Err(err);
         }
     };
     let bind_addr = socket.local_addr().ok();
     send_reply(&mut socket, REP_SUCCEEDED, bind_addr).await?;
+    debug!(%remote_addr, %target, "socks5 connect established");
     let session_guard = state.proxy_manager.register(account_id);
     let shutdown = session_guard.shutdown_rx();
     let result =
@@ -330,7 +351,7 @@ async fn handle_udp_associate(
     associations: Arc<DashMap<IpAddr, Arc<SocksUdpAssociation>>>,
     sessions: Arc<DashMap<SocksUdpSessionKey, SocksUdpSession>>,
 ) -> anyhow::Result<()> {
-    let _requested = match read_socks_addr(&mut socket, atyp).await {
+    let requested = match read_socks_addr(&mut socket, atyp).await {
         Ok(addr) => addr,
         Err(err) => {
             let rep = if is_addr_type_error(&err) {
@@ -360,7 +381,7 @@ async fn handle_udp_associate(
         .clone();
     association.refs.fetch_add(1, Ordering::Relaxed);
     association.last_seen.store(now_secs(), Ordering::Relaxed);
-    debug!(%remote_addr, udp_addr = %udp_addr, "socks5 udp associate accepted");
+    debug!(%remote_addr, requested = %requested.target(), udp_addr = %udp_addr, "socks5 udp associate accepted");
     send_reply(&mut socket, REP_SUCCEEDED, Some(udp_addr)).await?;
 
     let session_guard = state.proxy_manager.register(auth.account_id.clone());

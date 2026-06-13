@@ -146,6 +146,18 @@ environment:
 
 公网部署时必须修改默认账号密码和默认 PSK。
 
+SOCKS5 UDP relay 公网部署时，还需要在 controller 配置中设置公网 UDP 返回地址，并同时放通 TCP/UDP 端口：
+
+```toml
+[server.socks5]
+listen = "0.0.0.0:10083"
+public_udp_addr = "your-controller-public-ip:10083"
+client_id = "client-1"
+enabled = true
+```
+
+如果不设置 `public_udp_addr`，SOCKS5 UDP ASSOCIATE 可能会向客户端返回 `0.0.0.0:10083`，部分客户端不会自动替换为 controller 公网 IP，UDP 测试会失败。
+
 ## 本地编译
 
 本地编译主要用于开发调试。正式部署优先使用 Docker。
@@ -339,4 +351,3 @@ session_ttl_secs = 86400
 docker compose build rps-controller
 docker compose up -d --no-build rps-controller
 ```
-

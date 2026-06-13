@@ -1,10 +1,7 @@
 use crate::{AppState, proxy_tcp, tunnel_manager::TunnelConnectionGuard};
 use bytes::Bytes;
 use dashmap::DashMap;
-use rps_core::{
-    config::TunnelConfig,
-    protocol::{OpenRequest, TargetProtocol},
-};
+use rps_core::{config::TunnelConfig, protocol::TargetProtocol};
 use rps_mux::MuxStreamWriter;
 use std::{
     net::SocketAddr,
@@ -92,38 +89,14 @@ async fn run_socket(
                 .target
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("udp tunnel target is required"))?;
-            let mux = state
-                .clients
-                .get(&tunnel.client_id)
-                .ok_or_else(|| anyhow::anyhow!("client {} is offline", tunnel.client_id))?
-                .clone();
-            let request = OpenRequest {
-                tunnel_id: tunnel.id.clone(),
-                protocol: TargetProtocol::Udp,
+            let stream = proxy_tcp::open_stream(
+                state.clone(),
+                &route,
+                TargetProtocol::Udp,
                 target,
-                remote_addr: remote_addr.to_string(),
-                timeout_ms: 5000,
-            };
-            let stream = mux
-                .open_stream(Bytes::from(serde_json::to_vec(&request)?))
-                .await?;
-            let db = state.db.clone();
-            let client_id = tunnel.client_id.clone();
-            let tunnel_id = tunnel.id.clone();
-            tokio::spawn(async move {
-                if let Err(err) = db
-                    .record_stream_open(
-                        &client_id,
-                        &tunnel_id,
-                        &request.protocol,
-                        &request.target,
-                        &request.remote_addr,
-                    )
-                    .await
-                {
-                    warn!(%remote_addr, error = %err, "failed to record udp stream session");
-                }
-            });
+                remote_addr.to_string(),
+            )
+            .await?;
             let (writer, mut reader) = stream.split();
             let last_seen = Arc::new(AtomicU64::new(now_secs()));
             let connection_guard = state.tunnel_manager.register_udp_session(&tunnel.id).await;

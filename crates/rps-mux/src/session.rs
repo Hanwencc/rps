@@ -169,6 +169,10 @@ impl MuxStream {
         self.id
     }
 
+    pub async fn recv_data(&mut self) -> Option<Bytes> {
+        self.inbound_rx.recv().await
+    }
+
     pub fn split(self) -> (MuxStreamWriter, MuxStreamReader) {
         (
             MuxStreamWriter {
