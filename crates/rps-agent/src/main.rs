@@ -188,27 +188,54 @@ async fn handle_tcp_target(
     send_open_ok(&writer).await?;
     let (mut target_read, mut target_write) = target.into_split();
 
-    let uplink = tokio::spawn(async move {
+    let writer_up = writer.clone();
+    let mut uplink = tokio::spawn(async move {
         while let Some(data) = reader.recv_data().await {
-            target_write.write_all(&data).await?;
+            if let Err(e) = target_write.write_all(&data).await {
+                return Err(e.into());
+            }
         }
+        let _ = target_write.shutdown().await;
         anyhow::Ok(())
     });
 
-    let downlink = tokio::spawn(async move {
+    let mut downlink = tokio::spawn(async move {
         let mut buf = vec![0_u8; TCP_COPY_BUF_SIZE];
         loop {
             let n = target_read.read(&mut buf).await?;
             if n == 0 {
-                writer.close().await?;
+                let _ = writer.close().await;
                 break;
             }
-            writer.send_data(Bytes::copy_from_slice(&buf[..n])).await?;
+            if let Err(e) = writer.send_data(Bytes::copy_from_slice(&buf[..n])).await {
+                return Err(e.into());
+            }
         }
         anyhow::Ok(())
     });
 
-    let _ = tokio::try_join!(uplink, downlink)?;
+    tokio::select! {
+        result = &mut uplink => {
+            if matches!(result, Err(_) | Ok(Err(_))) {
+                downlink.abort();
+            }
+            let res2 = downlink.await;
+            result??;
+            if let Ok(Err(e)) = res2 {
+                return Err(e);
+            }
+        }
+        result = &mut downlink => {
+            if matches!(result, Err(_) | Ok(Err(_))) {
+                uplink.abort();
+            }
+            let res2 = uplink.await;
+            result??;
+            if let Ok(Err(e)) = res2 {
+                return Err(e);
+            }
+        }
+    }
     Ok(())
 }
 

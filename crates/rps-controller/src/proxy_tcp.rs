@@ -244,12 +244,12 @@ async fn pipe_tcp_mux_inner(
             loop {
                 let n = tcp_read.read(&mut buf).await?;
                 if n == 0 {
-                    mux_write.close().await?;
+                    let _ = mux_write.close().await; // send MUX Close gracefully without propagating error on shutdown
                     break;
                 }
-                mux_write
-                    .send_data(Bytes::copy_from_slice(&buf[..n]))
-                    .await?;
+                if let Err(e) = mux_write.send_data(Bytes::copy_from_slice(&buf[..n])).await {
+                    return Err(e.into()); // Stop on mux channel drop
+                }
                 if let Some(recorder) = &recorder {
                     recorder.add(0, n as u64);
                 }
@@ -261,25 +261,34 @@ async fn pipe_tcp_mux_inner(
     let recorder = recorder.clone();
     let mut downlink = tokio::spawn(async move {
         while let Some(data) = mux_read.recv_data().await {
-            tcp_write.write_all(&data).await?;
+            if let Err(e) = tcp_write.write_all(&data).await {
+                return Err(e.into());
+            }
             if let Some(recorder) = &recorder {
                 recorder.add(data.len() as u64, 0);
             }
         }
+        let _ = tcp_write.shutdown().await; // Ensure FIN is sent properly on graceful end
         anyhow::Ok(())
     });
 
     if let Some(mut shutdown) = shutdown {
         tokio::select! {
             result = &mut uplink => {
+                if matches!(result, Err(_) | Ok(Err(_))) {
+                    downlink.abort();
+                }
+                let res2 = downlink.await;
                 finish_pipe_task(result)?;
-                downlink.abort();
-                let _ = downlink.await;
+                finish_pipe_task(res2)?;
             }
             result = &mut downlink => {
+                if matches!(result, Err(_) | Ok(Err(_))) {
+                    uplink.abort();
+                }
+                let res2 = uplink.await;
                 finish_pipe_task(result)?;
-                uplink.abort();
-                let _ = uplink.await;
+                finish_pipe_task(res2)?;
             }
             _ = shutdown.changed() => {
                 let _ = mux_write.close().await;
@@ -290,7 +299,24 @@ async fn pipe_tcp_mux_inner(
             }
         }
     } else {
-        let _ = tokio::try_join!(uplink, downlink)?;
+        tokio::select! {
+            result = &mut uplink => {
+                if matches!(result, Err(_) | Ok(Err(_))) {
+                    downlink.abort();
+                }
+                let res2 = downlink.await;
+                finish_pipe_task(result)?;
+                finish_pipe_task(res2)?;
+            }
+            result = &mut downlink => {
+                if matches!(result, Err(_) | Ok(Err(_))) {
+                    uplink.abort();
+                }
+                let res2 = uplink.await;
+                finish_pipe_task(result)?;
+                finish_pipe_task(res2)?;
+            }
+        }
     }
     Ok(())
 }

@@ -14,7 +14,7 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-type StreamTx = mpsc::Sender<Bytes>;
+type StreamTx = mpsc::UnboundedSender<Bytes>;
 
 #[derive(Clone)]
 pub struct MuxHandle {
@@ -31,7 +31,7 @@ pub struct Mux {
 pub struct MuxStream {
     id: u32,
     writer_tx: mpsc::Sender<Frame>,
-    inbound_rx: mpsc::Receiver<Bytes>,
+    inbound_rx: mpsc::UnboundedReceiver<Bytes>,
 }
 
 #[derive(Clone)]
@@ -41,7 +41,7 @@ pub struct MuxStreamWriter {
 }
 
 pub struct MuxStreamReader {
-    inbound_rx: mpsc::Receiver<Bytes>,
+    inbound_rx: mpsc::UnboundedReceiver<Bytes>,
 }
 
 impl Mux {
@@ -82,9 +82,9 @@ impl Mux {
 
                 match frame.frame_type {
                     FrameType::Open => {
-                        let (inbound_tx, inbound_rx) = mpsc::channel::<Bytes>(1024);
+                        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<Bytes>();
                         if !frame.payload.is_empty() {
-                            let _ = inbound_tx.send(frame.payload).await;
+                            let _ = inbound_tx.send(frame.payload);
                         }
                         streams.insert(frame.stream_id, inbound_tx);
                         let stream = MuxStream {
@@ -108,7 +108,7 @@ impl Mux {
                     }
                     FrameType::Data => {
                         if let Some(tx) = streams.get(&frame.stream_id) {
-                            let _ = tx.send(frame.payload).await;
+                            let _ = tx.send(frame.payload);
                         }
                     }
                     FrameType::Close | FrameType::Error => {
@@ -142,7 +142,7 @@ impl Mux {
 impl MuxHandle {
     pub async fn open_stream(&self, payload: Bytes) -> io::Result<MuxStream> {
         let id = self.next_stream_id();
-        let (inbound_tx, inbound_rx) = mpsc::channel::<Bytes>(1024);
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<Bytes>();
         self.streams.insert(id, inbound_tx);
         if let Err(err) = self
             .writer_tx
