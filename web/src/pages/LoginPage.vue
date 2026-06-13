@@ -1,33 +1,51 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { KeyRound, LockKeyhole, ShieldCheck } from "lucide-vue-next";
-import type { LoginPayload } from "../types";
+import { login } from "../api";
+import { applyAuthStatus } from "../auth";
 
-const props = defineProps<{
-  loading: boolean;
-  error: string | null;
-  requires2fa: boolean;
-  securityKeyAvailable: boolean;
-}>();
-
-const emit = defineEmits<{
-  login: [payload: LoginPayload];
-}>();
+const route = useRoute();
+const router = useRouter();
 
 const form = ref({
   username: "admin",
   password: "",
   otp_code: "",
 });
+const loading = ref(false);
+const error = ref<string | null>(null);
+const requires2fa = ref(false);
+const securityKeyAvailable = ref(false);
 
-const title = computed(() => (props.requires2fa ? "双因素认证" : "登录控制台"));
+const title = computed(() => (requires2fa.value ? "双因素认证" : "登录控制台"));
 
-function submit() {
-  emit("login", {
-    username: form.value.username.trim(),
-    password: form.value.password,
-    otp_code: form.value.otp_code.trim() || null,
-  });
+async function submit() {
+  error.value = null;
+  loading.value = true;
+  try {
+    const response = await login({
+      username: form.value.username.trim(),
+      password: form.value.password,
+      otp_code: form.value.otp_code.trim() || null,
+    });
+    securityKeyAvailable.value = response.security_key_available;
+    if (response.requires_2fa) {
+      requires2fa.value = true;
+      return;
+    }
+    applyAuthStatus({
+      authenticated: response.authenticated,
+      username: response.username,
+      securityKeyAvailable: response.security_key_available,
+    });
+    const redirect = typeof route.query.redirect === "string" ? route.query.redirect : "/dashboard";
+    await router.replace(redirect.startsWith("/") && !redirect.startsWith("/login") ? redirect : "/dashboard");
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : "登录失败";
+  } finally {
+    loading.value = false;
+  }
 }
 </script>
 

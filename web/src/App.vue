@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
-import { RouterView, useRoute } from "vue-router";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { RouterView, useRoute, useRouter } from "vue-router";
 import {
   HttpError,
-  authStatus,
   createClient,
   createProxyAccount,
   createTunnel,
@@ -11,21 +10,19 @@ import {
   deleteProxyAccount,
   deleteTunnel,
   loadConsoleData,
-  login,
   updateClient,
   updateProxyAccount,
   updateTunnel,
 } from "./api";
+import { authState, clearAuth, ensureAuthStatus } from "./auth";
 import PageHeader from "./components/PageHeader.vue";
 import Sidebar from "./components/Sidebar.vue";
-import LoginPage from "./pages/LoginPage.vue";
 import type {
   ClientResponse,
   ConsoleData,
   CreateClientPayload,
   CreateProxyAccountPayload,
   CreateTunnelPayload,
-  LoginPayload,
   MenuKey,
   ProxyAccountResponse,
   ProxyResponse,
@@ -49,12 +46,7 @@ const menuLabels: Record<MenuKey, string> = {
 };
 
 const route = useRoute();
-const authenticated = ref(false);
-const authLoading = ref(true);
-const loginLoading = ref(false);
-const loginError = ref<string | null>(null);
-const requires2fa = ref(false);
-const securityKeyAvailable = ref(false);
+const router = useRouter();
 const status = ref<StatusResponse | null>(null);
 const clients = ref<ClientResponse[]>([]);
 const tunnels = ref<TunnelResponse[]>([]);
@@ -85,6 +77,7 @@ const activeTitle = computed(() => {
   const title = route.meta.title;
   return typeof title === "string" ? title : menuLabels[activeMenu.value];
 });
+const isLoginRoute = computed(() => route.name === "login");
 const tcpTunnels = computed(() => tunnels.value.filter((tunnel) => tunnel.mode === "tcp"));
 const udpTunnels = computed(() => tunnels.value.filter((tunnel) => tunnel.mode === "udp"));
 const pageProps = computed<Record<string, unknown>>(() => {
@@ -151,7 +144,7 @@ const pageProps = computed<Record<string, unknown>>(() => {
 });
 
 async function refresh() {
-  if (!authenticated.value) {
+  if (!authState.authenticated || isLoginRoute.value) {
     return;
   }
   error.value = null;
@@ -160,8 +153,7 @@ async function refresh() {
     applyConsoleData(data);
   } catch (err) {
     if (err instanceof HttpError && err.status === 401) {
-      authenticated.value = false;
-      stopRealtimeEvents();
+      redirectToLogin();
       return;
     }
     error.value = err instanceof Error ? err.message : "加载控制端状态失败";
@@ -179,28 +171,6 @@ function applyConsoleData(data: ConsoleData) {
   lastUpdated.value = new Date().toLocaleTimeString();
   loading.value = false;
   error.value = null;
-}
-
-async function handleLogin(payload: LoginPayload) {
-  loginError.value = null;
-  loginLoading.value = true;
-  try {
-    const response = await login(payload);
-    securityKeyAvailable.value = response.security_key_available;
-    if (response.requires_2fa) {
-      requires2fa.value = true;
-      return;
-    }
-    authenticated.value = response.authenticated;
-    requires2fa.value = false;
-    loading.value = true;
-    startRealtimeEvents();
-    await refresh();
-  } catch (err) {
-    loginError.value = err instanceof Error ? err.message : "登录失败";
-  } finally {
-    loginLoading.value = false;
-  }
 }
 
 async function handleCreateClient(payload: CreateClientPayload) {
@@ -382,8 +352,7 @@ function startRealtimeEvents() {
     }
   });
   events.addEventListener("auth_expired", () => {
-    authenticated.value = false;
-    stopRealtimeEvents();
+    redirectToLogin();
   });
   events.addEventListener("stream_error", (event) => {
     error.value = event.data || "实时数据推送失败";
@@ -400,35 +369,48 @@ function stopRealtimeEvents() {
   events = null;
 }
 
+async function startAuthenticatedRuntime() {
+  if (!authState.authenticated || isLoginRoute.value) {
+    stopRealtimeEvents();
+    return;
+  }
+  if (!events) {
+    startRealtimeEvents();
+  }
+  if (!status.value) {
+    loading.value = true;
+    await refresh();
+  }
+}
+
+function redirectToLogin() {
+  clearAuth();
+  stopRealtimeEvents();
+  const redirect = route.fullPath === "/login" ? "/dashboard" : route.fullPath;
+  router.replace({ name: "login", query: { redirect } });
+}
+
 onMounted(async () => {
   try {
-    const auth = await authStatus();
-    authenticated.value = auth.authenticated;
-    securityKeyAvailable.value = auth.security_key_available;
-    if (auth.authenticated) {
-      startRealtimeEvents();
-      await refresh();
-    }
-  } catch (err) {
-    loginError.value = err instanceof Error ? err.message : "读取登录状态失败";
+    await ensureAuthStatus();
+    await startAuthenticatedRuntime();
   } finally {
-    authLoading.value = false;
     loading.value = false;
   }
 });
+
+watch(
+  () => [authState.authenticated, isLoginRoute.value] as const,
+  () => {
+    void startAuthenticatedRuntime();
+  },
+);
 
 onUnmounted(stopRealtimeEvents);
 </script>
 
 <template>
-  <LoginPage
-    v-if="!authenticated"
-    :error="loginError"
-    :loading="authLoading || loginLoading"
-    :requires2fa="requires2fa"
-    :security-key-available="securityKeyAvailable"
-    @login="handleLogin"
-  />
+  <RouterView v-if="isLoginRoute" />
 
   <main v-else class="min-h-screen bg-[#eef1f5] text-slate-800">
     <div class="flex min-h-screen">
